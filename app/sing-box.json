@@ -1,0 +1,138 @@
+{
+  "log": {
+    "level": "info",
+    "timestamp": true
+  },
+  "dns": {
+    "final": "local-dns",
+    "reverse_mapping": true,
+    "rules": [
+      {
+        "action": "route",
+        "domain_suffix": [
+          "discord.com",
+          "discord.gg",
+          "discord.media",
+          "discordapp.com",
+          "discordapp.net",
+          "googlevideo.com",
+          "rutracker.cc",
+          "rutracker.net",
+          "rutracker.org",
+          "scdn.co",
+          "spotify.com",
+          "spotifycdn.com",
+          "youtu.be",
+          "youtube.com",
+          "ytimg.com"
+        ],
+        "query_type": [
+          "A",
+          "AAAA"
+        ],
+        "server": "fake-dns"
+      }
+    ],
+    "servers": [
+      {
+        "tag": "local-dns",
+        "type": "local"
+      },
+      {
+        "inet4_range": "198.18.0.0/15",
+        "inet6_range": "fc00::/18",
+        "tag": "fake-dns",
+        "type": "fakeip"
+      }
+    ]
+  },
+  "inbounds": [
+    {
+      "address": [
+        "172.19.0.1/30",
+        "fdfe:dcba:9876::1/126"
+      ],
+      "auto_route": true,
+      "interface_name": "kasper-tun",
+      "stack": "mixed",
+      "strict_route": true,
+      "tag": "tun-in",
+      "type": "tun"
+    }
+  ],
+  "outbounds": [
+    {
+      "tag": "direct",
+      "type": "direct"
+    },
+    {
+      "server": "127.0.0.1",
+      "server_port": 1080,
+      "tag": "proxy",
+      "type": "socks",
+      "version": "5"
+    }
+  ],
+  "route": {
+    "auto_detect_interface": true,
+    "default_domain_resolver": "local-dns",
+    "final": "direct",
+    "rules": [
+      {
+        "action": "sniff"
+      },
+      {
+        "action": "hijack-dns",
+        "mode": "or",
+        "rules": [
+          {
+            "protocol": "dns"
+          },
+          {
+            "port": 53
+          }
+        ],
+        "type": "logical"
+      },
+      {
+        "action": "route",
+        "domain_suffix": [
+          "discord.com",
+          "discord.gg",
+          "discord.media",
+          "discordapp.com",
+          "discordapp.net",
+          "googlevideo.com",
+          "rutracker.cc",
+          "rutracker.net",
+          "rutracker.org",
+          "scdn.co",
+          "spotify.com",
+          "spotifycdn.com",
+          "youtu.be",
+          "youtube.com",
+          "ytimg.com"
+        ],
+        "outbound": "proxy"
+      },
+      {
+        "action": "route",
+        "outbound": "proxy",
+        "process_name": [
+          "Discord",
+          "Discord.exe",
+          "DiscordCanary",
+          "DiscordCanary.exe",
+          "DiscordPTB",
+          "DiscordPTB.exe",
+          "Spotify",
+          "Spotify.exe",
+          "discord",
+          "discordcanary",
+          "discordptb",
+          "spotify"
+        ]
+      }
+    ]
+  }
+}

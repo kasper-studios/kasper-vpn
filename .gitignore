@@ -1,0 +1,15 @@
+.env
+*.env
+target/
+node_modules/
+*.db
+*.db-wal
+*.db-shm
+*.log
+logs/
+backups/
+backend/
+design/
+DevNotes.md
+extersion/
+.system_generated/
