@@ -19,6 +19,7 @@ use tokio::{
 };
 use url::Url;
 mod account;
+mod apps;
 mod mtproto;
 mod system_proxy;
 use account::AccountClient;
@@ -62,7 +63,7 @@ impl Default for Settings {
             mode: default_mode(),
             sing_box_path: "sing-box".into(),
             mtproto_port: default_mtproto_port(),
-            mtproto_secret: String::new(),
+            mtproto_secret: mtproto::generate_secret(),
         }
     }
 }
@@ -155,7 +156,12 @@ fn vless(key: &str) -> Result<Value> {
     match get("security") {
         "" | "none" => {}
         "tls" | "reality" => {
-            let mut tls = json!({"enabled":true, "server_name": if get("sni").is_empty() { host } else { get("sni") }});
+            let sni = match get("sni") {
+                "" => host,
+                "dl.delivery.mp.microsoft.com" => "www.microsoft.com",
+                other => other,
+            };
+            let mut tls = json!({"enabled":true, "server_name": sni});
             if !get("fp").is_empty() {
                 tls["utls"] = json!({"enabled":true,"fingerprint":get("fp")});
             }
@@ -201,7 +207,7 @@ fn generate(settings: &Settings, secret: &str) -> Result<Value> {
     if !matches!(settings.mode.as_str(), "system" | "telegram" | "tun") {
         return Err("Неизвестный режим сети".into());
     }
-    if settings.mode == "tun" {
+    if settings.mode == "tun" || settings.mode == "system" {
         for line in settings
             .domains
             .lines()
@@ -214,43 +220,88 @@ fn generate(settings: &Settings, secret: &str) -> Result<Value> {
         }
     }
     let mut apps = BTreeSet::new();
-    if settings.mode == "tun" {
+    if settings.mode == "tun" || settings.mode == "system" {
         for app in &settings.applications {
-            let names: &[&str] = match app.as_str() {
-                "discord" => &[
-                    "Discord",
-                    "discord",
-                    "Discord.exe",
-                    "DiscordCanary",
-                    "DiscordCanary.exe",
-                    "DiscordPTB",
-                    "DiscordPTB.exe",
-                ],
-                "spotify" => &["spotify", "Spotify", "Spotify.exe"],
-                "steam" => &["steam", "steam.exe", "steamwebhelper", "steamwebhelper.exe"],
-                "browser" => &[
-                    "firefox",
-                    "firefox.exe",
-                    "chrome",
-                    "chrome.exe",
-                    "chromium",
-                    "chromium-browser",
-                    "msedge.exe",
-                    "brave",
-                    "brave.exe",
-                ],
-                _ => return Err(format!("Неизвестное приложение: {app}")),
-            };
-            apps.extend(names.iter().map(|name| (*name).to_string()));
+            let app_trimmed = app.trim();
+            if app_trimmed.is_empty() {
+                continue;
+            }
+            match app_trimmed.to_ascii_lowercase().as_str() {
+                "discord" => {
+                    apps.extend(
+                        [
+                            "Discord",
+                            "discord",
+                            "Discord.exe",
+                            "DiscordCanary",
+                            "DiscordCanary.exe",
+                            "DiscordPTB",
+                            "DiscordPTB.exe",
+                        ]
+                        .iter()
+                        .map(|s| s.to_string()),
+                    );
+                }
+                "spotify" => {
+                    apps.extend(
+                        ["spotify", "Spotify", "Spotify.exe"]
+                            .iter()
+                            .map(|s| s.to_string()),
+                    );
+                }
+                "steam" => {
+                    apps.extend(
+                        ["steam", "steam.exe", "steamwebhelper", "steamwebhelper.exe"]
+                            .iter()
+                            .map(|s| s.to_string()),
+                    );
+                }
+                "browser" => {
+                    apps.extend(
+                        [
+                            "firefox",
+                            "firefox.exe",
+                            "chrome",
+                            "chrome.exe",
+                            "chromium",
+                            "chromium-browser",
+                            "msedge.exe",
+                            "brave",
+                            "brave.exe",
+                        ]
+                        .iter()
+                        .map(|s| s.to_string()),
+                    );
+                }
+                "telegram" => {
+                    apps.extend(
+                        [
+                            "telegram-desktop",
+                            "Telegram",
+                            "Telegram.exe",
+                            "telegram",
+                        ]
+                        .iter()
+                        .map(|s| s.to_string()),
+                    );
+                }
+                _ => {
+                    apps.insert(app_trimmed.to_string());
+                    if !app_trimmed.ends_with(".exe") {
+                        apps.insert(format!("{app_trimmed}.exe"));
+                    }
+                }
+            }
         }
     }
+    let parsed_domains = if settings.mode == "tun" || settings.mode == "system" {
+        parser::parse_domains(&settings.domains)
+    } else {
+        BTreeSet::new()
+    };
     let policy = config::SplitTunnel {
-        domains: if settings.mode == "tun" {
-            parser::parse_domains(&settings.domains)
-        } else {
-            BTreeSet::new()
-        },
-        applications: apps,
+        domains: parsed_domains.clone(),
+        applications: apps.clone(),
         proxy_server: String::new(),
         proxy_port: 0,
     };
@@ -261,6 +312,12 @@ fn generate(settings: &Settings, secret: &str) -> Result<Value> {
         cfg["route"]["auto_detect_interface"] = json!(true);
         cfg["route"]["default_domain_resolver"] = json!({"server":"local-dns"});
         cfg["outbounds"][1]["domain_resolver"] = json!({"server":"local-dns"});
+        cfg["inbounds"].as_array_mut().unwrap().push(json!({
+            "type":"mixed", "tag":"metrics-in", "listen":"127.0.0.1", "listen_port":17892
+        }));
+        cfg["route"]["rules"].as_array_mut().unwrap().insert(1, json!({
+            "inbound": "metrics-in", "action": "route", "outbound": "proxy"
+        }));
     } else {
         cfg["dns"]["rules"] = json!([]);
         cfg["dns"]["servers"] = json!([{"type":"local", "tag":"local-dns"}]);
@@ -269,10 +326,6 @@ fn generate(settings: &Settings, secret: &str) -> Result<Value> {
             .as_object_mut()
             .unwrap()
             .remove("reverse_mapping");
-        cfg["route"]["rules"] = json!([
-            {"inbound":"local-in", "action":"route", "outbound":"proxy"},
-            {"protocol":"dns", "action":"hijack-dns"}
-        ]);
         cfg["route"]["final"] = json!("direct");
         cfg["route"]["auto_detect_interface"] = json!(true);
         cfg["route"]["default_domain_resolver"] = json!({"server":"local-dns"});
@@ -290,18 +343,30 @@ fn generate(settings: &Settings, secret: &str) -> Result<Value> {
     if settings.mode != "tun" {
         cfg["route"]["rules"] = if settings.mode == "system" {
             let mut rules = vec![
+                json!({"action": "sniff"}),
                 json!({"ip_cidr":["127.0.0.0/8", "::1/128"], "action":"route", "outbound":"direct"}),
-                json!({"inbound":"local-in", "action":"route", "outbound":"proxy"}),
+                json!({"inbound":"metrics-in", "action":"route", "outbound":"proxy"}),
+                json!({"type": "logical", "mode": "or", "rules": [{"protocol": "dns"}, {"port": 53}], "action": "hijack-dns"}),
             ];
-            rules.extend(
-                original_route_rules
-                    .iter()
-                    .filter(|r| r.get("domain_suffix").is_none() && r.get("process_name").is_none())
-                    .cloned(),
-            );
+            let has_domains = !parsed_domains.is_empty();
+            let has_apps = !apps.is_empty();
+            if has_domains {
+                let dom_vec: Vec<_> = parsed_domains.iter().collect();
+                rules.push(json!({"domain_suffix": dom_vec, "action": "route", "outbound": "proxy"}));
+            }
+            if has_apps {
+                let app_vec: Vec<_> = apps.iter().collect();
+                rules.push(json!({"process_name": app_vec, "action": "route", "outbound": "proxy"}));
+            }
+            if !has_domains && !has_apps {
+                rules.push(json!({"inbound": "local-in", "action": "route", "outbound": "proxy"}));
+            }
             json!(rules)
         } else {
             let mut rules = vec![
+                json!({"action": "sniff"}),
+                json!({"ip_cidr":["127.0.0.0/8", "::1/128"], "action":"route", "outbound":"direct"}),
+                json!({"inbound":"metrics-in", "action":"route", "outbound":"proxy"}),
                 json!({"inbound":"local-in", "action":"route", "outbound":"proxy"}),
                 json!({"process_name":["telegram-desktop", "Telegram", "Telegram.exe"], "action":"route", "outbound":"proxy"}),
                 json!({"domain_suffix":["t.me", "telegram.me", "telegram.org", "telegram.dog", "telegra.ph", "telegram.space"], "action":"route", "outbound":"proxy"}),
@@ -309,7 +374,7 @@ fn generate(settings: &Settings, secret: &str) -> Result<Value> {
             rules.extend(
                 original_route_rules
                     .iter()
-                    .filter(|r| r.get("domain_suffix").is_none() && r.get("process_name").is_none())
+                    .filter(|r| r.get("domain_suffix").is_none() && r.get("process_name").is_none() && r.get("action") != Some(&json!("sniff")))
                     .cloned(),
             );
             json!(rules)
@@ -386,6 +451,56 @@ async fn clear_account_vless(state: State<'_, Backend>) -> Result<()> {
     Ok(())
 }
 
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountTraffic {
+    pub username: String,
+    pub used_mb: String,
+    pub used_gb: String,
+    pub total_gb: String,
+    pub percentage: u8,
+    pub has_active_subscription: bool,
+    pub is_admin: bool,
+}
+
+#[tauri::command]
+async fn get_account_traffic(state: State<'_, Backend>) -> Result<AccountTraffic> {
+    let key = {
+        let session = state.session.lock().await;
+        session.settings.key.clone()
+    };
+    if key.trim().is_empty() {
+        return Err("Ключ VLESS не указан".into());
+    }
+    let url = Url::parse(key.trim()).map_err(|_| "Некорректная VLESS-ссылка")?;
+    let uuid = url.username();
+    if uuid.is_empty() {
+        return Err("В ссылке VLESS отсутствует UUID".into());
+    }
+    let client = vpn_http_client()
+        .timeout(Duration::from_secs(6))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let response = client
+        .get(format!("https://vpn.kasperstudios.xyz/api/traffic-status?uuid={uuid}"))
+        .send()
+        .await
+        .map_err(|e| format!("Ошибка связи с сервером: {e}"))?;
+    if !response.status().is_success() {
+        return Err("Аккаунт по данному ключу не найден".into());
+    }
+    let data: Value = response.json().await.map_err(|e| e.to_string())?;
+    Ok(AccountTraffic {
+        username: data["username"].as_str().unwrap_or("").to_string(),
+        used_mb: data["usedMB"].as_str().unwrap_or("0.00").to_string(),
+        used_gb: data["usedGB"].as_str().unwrap_or("0.00").to_string(),
+        total_gb: data["totalGB"].as_str().unwrap_or("0").to_string(),
+        percentage: data["percentage"].as_u64().unwrap_or(0) as u8,
+        has_active_subscription: data["hasActiveSubscription"].as_bool().unwrap_or(false),
+        is_admin: data["isAdmin"].as_bool().unwrap_or(false),
+    })
+}
+
 #[tauri::command]
 async fn save_settings(settings: Settings, state: State<'_, Backend>) -> Result<()> {
     let mut session = state.session.lock().await;
@@ -401,6 +516,224 @@ async fn save_settings(settings: Settings, state: State<'_, Backend>) -> Result<
     .await?;
     session.settings = settings;
     Ok(())
+}
+
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SingBoxStatus {
+    pub installed: bool,
+    pub path: String,
+    pub version: String,
+}
+
+async fn test_sing_box_version(path: &Path) -> Option<String> {
+    if !path.exists() {
+        return None;
+    }
+    let mut cmd = command(&path.to_string_lossy());
+    cmd.arg("version");
+    if let Ok(Ok(output)) = tokio::time::timeout(Duration::from_secs(3), cmd.output()).await {
+        if output.status.success() {
+            let out_str = String::from_utf8_lossy(&output.stdout);
+            let first_line = out_str.lines().next().unwrap_or("sing-box").trim();
+            return Some(first_line.to_string());
+        }
+    }
+    None
+}
+
+async fn test_sing_box_command(binary: &str) -> Option<String> {
+    let mut cmd = command(binary);
+    cmd.arg("version");
+    if let Ok(Ok(output)) = tokio::time::timeout(Duration::from_secs(3), cmd.output()).await {
+        if output.status.success() {
+            let out_str = String::from_utf8_lossy(&output.stdout);
+            let first_line = out_str.lines().next().unwrap_or("sing-box").trim();
+            return Some(first_line.to_string());
+        }
+    }
+    None
+}
+
+async fn find_existing_sing_box(configured_path: &str, backend: &Backend) -> Option<(PathBuf, String)> {
+    let trimmed = configured_path.trim();
+    if !trimmed.is_empty() && trimmed != "sing-box" && trimmed != "sing-box.exe" {
+        let p = PathBuf::from(trimmed);
+        if let Some(v) = test_sing_box_version(&p).await {
+            return Some((p, v));
+        }
+    }
+
+    let mut candidates: Vec<PathBuf> = Vec::new();
+
+    if let Ok(current_exe) = std::env::current_exe() {
+        if let Some(parent) = current_exe.parent() {
+            #[cfg(windows)]
+            candidates.push(parent.join("sing-box.exe"));
+            #[cfg(not(windows))]
+            candidates.push(parent.join("sing-box"));
+        }
+    }
+
+    #[cfg(windows)]
+    candidates.push(backend.dir.join("sing-box.exe"));
+    #[cfg(not(windows))]
+    candidates.push(backend.dir.join("sing-box"));
+
+    #[cfg(windows)]
+    {
+        if let Ok(local) = std::env::var("LOCALAPPDATA") {
+            candidates.push(PathBuf::from(local).join("KasperVPN").join("bin").join("sing-box.exe"));
+        }
+    }
+
+    for candidate in &candidates {
+        if let Some(v) = test_sing_box_version(candidate).await {
+            return Some((candidate.clone(), v));
+        }
+    }
+
+    let path_bin = if cfg!(windows) { "sing-box.exe" } else { "sing-box" };
+    if let Some(v) = test_sing_box_command(path_bin).await {
+        return Some((PathBuf::from(path_bin), v));
+    }
+
+    None
+}
+
+async fn download_sing_box(dest: &Path) -> Result<PathBuf> {
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(120))
+        .danger_accept_invalid_certs(true)
+        .build()
+        .map_err(|e| format!("Ошибка создания HTTP клиента: {e}"))?;
+
+    let filename = if cfg!(windows) {
+        "sing-box-windows-x64.exe"
+    } else {
+        "sing-box-linux-x64"
+    };
+
+    let urls = [
+        format!("https://vpn.kasperstudios.xyz/downloads/{}", filename),
+        format!("http://92.5.238.211:3000/downloads/{}", filename),
+    ];
+
+    let mut last_err = String::new();
+    let mut success_bytes: Option<Vec<u8>> = None;
+
+    for url in urls {
+        match client.get(&url).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                match resp.bytes().await {
+                    Ok(b) => {
+                        success_bytes = Some(b.to_vec());
+                        break;
+                    }
+                    Err(e) => {
+                        last_err = format!("Ошибка загрузки {url}: {e}");
+                    }
+                }
+            }
+            Ok(resp) => {
+                last_err = format!("Сервер {url} вернул статус {}", resp.status());
+            }
+            Err(e) => {
+                last_err = format!("Ошибка соединения с {url}: {e}");
+            }
+        }
+    }
+
+    let bytes = success_bytes.ok_or_else(|| {
+        format!("Не удалось автоматически скачать sing-box: {last_err}")
+    })?;
+
+    if let Some(parent) = dest.parent() {
+        tokio::fs::create_dir_all(parent).await.map_err(|e| e.to_string())?;
+    }
+
+    let tmp = dest.with_extension("downloading");
+    tokio::fs::write(&tmp, &bytes)
+        .await
+        .map_err(|e| format!("Ошибка сохранения sing-box: {e}"))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755));
+    }
+
+    let _ = tokio::fs::remove_file(dest).await;
+    tokio::fs::rename(&tmp, dest)
+        .await
+        .map_err(|e| format!("Ошибка переименования: {e}"))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(dest, std::fs::Permissions::from_mode(0o755));
+    }
+
+    Ok(dest.to_path_buf())
+}
+
+async fn ensure_sing_box(configured_path: &str, backend: &Backend) -> Result<PathBuf> {
+    if let Some((path, _)) = find_existing_sing_box(configured_path, backend).await {
+        return Ok(path);
+    }
+
+    #[cfg(windows)]
+    let target_path = {
+        if let Ok(local) = std::env::var("LOCALAPPDATA") {
+            let bin_dir = PathBuf::from(local).join("KasperVPN").join("bin");
+            let _ = tokio::fs::create_dir_all(&bin_dir).await;
+            bin_dir.join("sing-box.exe")
+        } else {
+            backend.dir.join("sing-box.exe")
+        }
+    };
+
+    #[cfg(not(windows))]
+    let target_path = backend.dir.join("sing-box");
+
+    download_sing_box(&target_path).await?;
+
+    if let Some((path, _)) = find_existing_sing_box(&target_path.to_string_lossy(), backend).await {
+        return Ok(path);
+    }
+
+    Ok(target_path)
+}
+
+#[tauri::command]
+async fn get_sing_box_status(state: State<'_, Backend>) -> Result<SingBoxStatus> {
+    let settings = state.session.lock().await.settings.clone();
+    if let Some((path, version)) = find_existing_sing_box(&settings.sing_box_path, &state).await {
+        Ok(SingBoxStatus {
+            installed: true,
+            path: path.to_string_lossy().to_string(),
+            version,
+        })
+    } else {
+        Ok(SingBoxStatus {
+            installed: false,
+            path: String::new(),
+            version: String::new(),
+        })
+    }
+}
+
+#[tauri::command]
+async fn install_sing_box(state: State<'_, Backend>) -> Result<SingBoxStatus> {
+    let settings = state.session.lock().await.settings.clone();
+    let path = ensure_sing_box(&settings.sing_box_path, &state).await?;
+    let version = test_sing_box_version(&path).await.unwrap_or_else(|| "sing-box (установлен)".to_string());
+    Ok(SingBoxStatus {
+        installed: true,
+        path: path.to_string_lossy().to_string(),
+        version,
+    })
 }
 
 async fn launch(key: String, mut settings: Settings, backend: &Backend) -> Result<()> {
@@ -428,6 +761,10 @@ async fn launch(key: String, mut settings: Settings, backend: &Backend) -> Resul
         &serde_json::to_string_pretty(&cfg).map_err(|e| e.to_string())?,
     )
     .await?;
+
+    let resolved_sing_box = ensure_sing_box(&settings.sing_box_path, backend).await?;
+    settings.sing_box_path = resolved_sing_box.to_string_lossy().to_string();
+
     let check = command(&settings.sing_box_path)
         .arg("check")
         .arg("-c")
@@ -437,7 +774,7 @@ async fn launch(key: String, mut settings: Settings, backend: &Backend) -> Resul
         .await
         .map_err(|_| "Проверка sing-box превысила 15 секунд")?
         .map_err(|e| {
-            format!("Не найден sing-box. Установите sing-box ≥ 1.12 или укажите полный путь: {e}")
+            format!("Ошибка запуска sing-box ({}): {e}", settings.sing_box_path)
         })?;
     if !checked.status.success() {
         return Err(format!(
@@ -541,8 +878,11 @@ struct MtprotoLink {
 }
 #[tauri::command]
 async fn mtproto_link(state: State<'_, Backend>) -> Result<MtprotoLink> {
-    let session = state.session.lock().await;
+    let mut session = state.session.lock().await;
     let running = session.mtproto.is_some();
+    if mtproto::parse_secret(&session.settings.mtproto_secret).is_none() {
+        session.settings.mtproto_secret = mtproto::generate_secret();
+    }
     let secret = session.settings.mtproto_secret.trim().to_owned();
     let link = mtproto::parse_secret(&secret).map(|_| {
         mtproto::proxy_link("127.0.0.1", session.settings.mtproto_port, &secret)
@@ -727,6 +1067,11 @@ async fn sync_zapret_domains(state: State<'_, Backend>) -> Result<DomainUpdate> 
     sync_domains(&state).await
 }
 
+#[tauri::command]
+async fn list_installed_applications() -> Result<Vec<apps::InstalledApp>> {
+    Ok(apps::list_installed_apps())
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -735,11 +1080,14 @@ pub fn run() {
             std::fs::create_dir_all(&dir)?;
             #[cfg(unix)]
             std::fs::set_permissions(&dir, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
-            let settings = match std::fs::read_to_string(dir.join("config.json")) {
+            let mut settings = match std::fs::read_to_string(dir.join("config.json")) {
                 Ok(text) => serde_json::from_str(&text)?,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => Settings::default(),
                 Err(e) => return Err(e.into()),
             };
+            if mtproto::parse_secret(&settings.mtproto_secret).is_none() {
+                settings.mtproto_secret = mtproto::generate_secret();
+            }
             let settings = Settings {
                 mode: migrate_mode(&settings.mode).into(),
                 ..settings
@@ -777,8 +1125,12 @@ pub fn run() {
             current_account,
             logout_account,
             clear_account_vless,
+            list_installed_applications,
             set_system_proxy,
-            mtproto_link
+            mtproto_link,
+            get_account_traffic,
+            get_sing_box_status,
+            install_sing_box
         ])
         .build(tauri::generate_context!())
         .expect("Не удалось запустить KasperVPN")
@@ -836,7 +1188,7 @@ mod tests {
         s.applications.clear();
         let cfg = generate(&s, "secret").unwrap();
         assert_eq!(cfg["inbounds"][0]["type"], "tun");
-        assert_eq!(cfg["route"]["rules"].as_array().unwrap().len(), 4);
+        assert_eq!(cfg["route"]["rules"].as_array().unwrap().len(), 5);
     }
 
     #[test]
@@ -845,19 +1197,13 @@ mod tests {
             let mut s = settings();
             s.mode = mode.into();
             let cfg = generate(&s, "secret").unwrap();
-            let expected_system_proxy = mode == "system" || mode == "proxy";
             assert_eq!(cfg["inbounds"][0]["listen"], "127.0.0.1");
             assert_eq!(cfg["inbounds"][0]["listen_port"], 17890);
             assert_eq!(cfg["inbounds"][0]["set_system_proxy"], json!(false));
             assert_eq!(cfg["route"]["final"], "direct");
-            if expected_system_proxy {
-                assert_eq!(cfg["route"]["rules"][0]["outbound"], "direct");
-                assert_eq!(cfg["route"]["rules"][1]["inbound"], "local-in");
-                assert_eq!(cfg["route"]["rules"][1]["outbound"], "proxy");
-            } else {
-                assert_eq!(cfg["route"]["rules"][0]["inbound"], "local-in");
-                assert_eq!(cfg["route"]["rules"][0]["outbound"], "proxy");
-            }
+            assert_eq!(cfg["route"]["rules"][0]["action"], "sniff");
+            assert_eq!(cfg["route"]["rules"][1]["outbound"], "direct");
+            assert!(cfg["route"]["rules"].as_array().unwrap().iter().any(|r| r.get("inbound") == Some(&json!("metrics-in")) && r["outbound"] == "proxy"));
             assert_eq!(cfg["outbounds"][1]["type"], "vless");
             assert_eq!(cfg["outbounds"][1]["server"], "example.com");
             assert_ne!(cfg["outbounds"][1]["server_port"], 17890);
@@ -865,9 +1211,31 @@ mod tests {
     }
 
     #[test]
+    fn system_mode_without_whitelist_routes_all_local_in_to_proxy() {
+        let mut s = settings();
+        s.mode = "system".into();
+        s.domains.clear();
+        s.applications.clear();
+        let cfg = generate(&s, "secret").unwrap();
+        let rules = cfg["route"]["rules"].as_array().unwrap();
+        assert!(rules.iter().any(|r| r.get("inbound") == Some(&json!("local-in")) && r["outbound"] == "proxy"));
+    }
+
+    #[test]
     fn legacy_local_proxy_mode_migrates_to_system_proxy() {
         assert_eq!(migrate_mode("proxy"), "system");
         assert_eq!(migrate_mode("telegram"), "telegram");
+    }
+
+    #[test]
+    fn custom_installed_apps_are_supported() {
+        let mut s = settings();
+        s.mode = "tun".into();
+        s.applications = vec!["custom_game".into(), "my_tool.exe".into()];
+        let cfg = generate(&s, "secret").unwrap();
+        let text = cfg.to_string();
+        assert!(text.contains("custom_game"));
+        assert!(text.contains("my_tool.exe"));
     }
     #[tokio::test]
     async fn real_process_lifecycle_and_local_api() {

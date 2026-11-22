@@ -43,6 +43,47 @@ function collect() {
     mtprotoSecret: settingsCache?.mtprotoSecret || '',
   };
 }
+function updateAppCount() {
+  const count = $$('input[name="application"]:checked').length;
+  const el = $('#app-count');
+  if (el) el.textContent = `${count} ВЫБРАНО`;
+}
+let installedAppsCache = [];
+function renderApps(apps, selectedApps) {
+  installedAppsCache = apps || [];
+  const container = $('#app-list');
+  if (!container) return;
+  const query = ($('#app-search')?.value || '').toLowerCase().trim();
+  const filtered = installedAppsCache.filter((app) => {
+    if (!query) return true;
+    return app.name.toLowerCase().includes(query) || app.exec.toLowerCase().includes(query);
+  });
+  container.innerHTML = filtered.map((app) => {
+    const isChecked = selectedApps.includes(app.id) || selectedApps.includes(app.exec);
+    const icon = app.id === 'discord' ? '◈' : app.id === 'spotify' ? '≋' : app.id === 'steam' ? '◉' : app.id === 'browser' ? '◎' : '⬡';
+    const iconClass = ['discord', 'spotify', 'steam', 'browser'].includes(app.id) ? app.id : '';
+    return `
+      <label class="app-row" data-name="${app.name.toLowerCase()}" data-exec="${app.exec.toLowerCase()}">
+        <span class="app-icon ${iconClass}">${icon}</span>
+        <span><b>${app.name}</b><small>${app.exec}</small></span>
+        <input type="checkbox" name="application" value="${app.id}" ${isChecked ? 'checked' : ''}>
+        <span class="switch" aria-hidden="true"></span>
+      </label>
+    `;
+  }).join('');
+  $$('#app-list input[name="application"]').forEach((input) => {
+    input.addEventListener('change', updateAppCount);
+  });
+  updateAppCount();
+}
+async function loadInstalledApps(selectedApps) {
+  try {
+    const apps = await invoke('list_installed_applications');
+    renderApps(apps, selectedApps || (settingsCache?.applications || []));
+  } catch (e) {
+    console.error('Failed to list installed apps:', e);
+  }
+}
 function countDomains() {
   $('#domain-count').textContent = `${$('#domains').value.split('\n').filter((line) => line.trim() && !line.trim().startsWith('#')).length} ДОМЕНОВ`;
 }
@@ -54,18 +95,44 @@ function populate(settings) {
   $('#mtproto-port').value = settings.mtprotoPort || 17893;
   $$('input[name="application"]').forEach((input) => { input.checked = settings.applications.includes(input.value); });
   $$('input[name="mode"]').forEach((input) => { input.checked = settings.mode === input.value; });
+  loadInstalledApps(settings.applications || []);
   countDomains();
   refreshMtproto();
+  refreshSingBoxStatus();
+}
+async function refreshSingBoxStatus() {
+  try {
+    const status = await invoke('get_sing_box_status');
+    const titleEl = $('#sing-box-status-title');
+    const pathEl = $('#sing-box-status-path');
+    const btn = $('#install-sing-box-btn');
+    if (!titleEl) return;
+    if (status.installed) {
+      titleEl.innerHTML = `🟢 <b>${status.version || 'sing-box установлен'}</b>`;
+      pathEl.textContent = status.path;
+      btn.hidden = true;
+    } else {
+      titleEl.innerHTML = `⚠️ <b>Движок sing-box не найден</b>`;
+      pathEl.textContent = 'Будет установлен автоматически при подключении или по кнопке справа';
+      btn.hidden = false;
+      btn.disabled = false;
+      btn.textContent = 'Установить автоматически';
+    }
+  } catch (e) {
+    console.error('Failed to get sing-box status:', e);
+  }
 }
 async function refreshMtproto() {
   try {
     const link = await invoke('mtproto_link');
     $('#mtproto-link').value = link.link || '';
     $('#copy-mtproto').disabled = !link.link;
-    $('#mtproto-status').textContent = link.running
-      ? 'MTProto-сервер запущен — Telegram в этой сети может подключаться по ссылке.'
-      : 'Сервер не запущен: включите режим «Telegram · MTProto» и подключитесь.';
-  } catch (_) { /* поле остаётся пустым до первого запуска */ }
+    if (link.running) {
+      $('#mtproto-status').innerHTML = '🟢 <b>MTProto-сервер активен.</b> Добавьте прокси в Telegram по ссылке выше или нажмите «Скопировать».';
+    } else {
+      $('#mtproto-status').innerHTML = '⚪ <b>Сервер не запущен.</b> Если хотите пустить через VPN <i>только Telegram</i>: выберите в блоке «Режим сети» режим «Telegram · MTProto-прокси» и нажмите «ПОДКЛЮЧИТЬ» на главной.<br><small class="muted">Если вам нужен обычный VPN для всей системы или TUN — этот блок настраивать не нужно.</small>';
+    }
+  } catch (_) { /* ignore */ }
 }
 async function save() {
   const buttons = $$('.save-settings');
@@ -75,6 +142,7 @@ async function save() {
     dirty = false;
     buttons.forEach((button) => { button.textContent = 'Сохранить настройки'; });
     notify(connected ? 'Сохранено. Переподключитесь для применения изменений.' : 'Настройки сохранены на устройстве.');
+    refreshQuota();
   } catch (error) { notify(error, true); }
   finally { buttons.forEach((button) => { button.disabled = false; }); }
 }
@@ -164,10 +232,32 @@ $('#sync-domains').addEventListener('click', async () => {
 });
 function bytes(value) {
   let amount = Number(value) || 0;
-  const units = ['Б', 'КБ', 'МБ', 'ГБ'];
+  const units = ['Б', 'КБ', 'МБ', 'ГБ', 'ТБ'];
   let unit = 0;
   while (amount >= 1024 && unit < units.length - 1) { amount /= 1024; unit++; }
-  return `${amount.toFixed(unit ? 1 : 0)} ${units[unit]}`;
+  return `${amount.toFixed(unit >= 3 ? 2 : (unit ? 1 : 0))} ${units[unit]}`;
+}
+async function refreshQuota() {
+  try {
+    const quota = await invoke('get_account_traffic');
+    if (quota) {
+      if (quota.isAdmin || Number(quota.totalGb) > 100000) {
+        $('#quota-used').replaceChildren(document.createTextNode(`${quota.usedGb} `));
+        const em = document.createElement('em'); em.textContent = 'ГБ'; $('#quota-used').append(em);
+        $('#quota-details').textContent = `Безлимит · ${quota.username || 'Создатель'}`;
+      } else if (Number(quota.totalGb) === 0) {
+        $('#quota-used').replaceChildren(document.createTextNode('0 '));
+        const em = document.createElement('em'); em.textContent = 'ГБ'; $('#quota-used').append(em);
+        $('#quota-details').textContent = 'Подписка не оплачена';
+      } else {
+        $('#quota-used').replaceChildren(document.createTextNode(`${quota.usedGb} / ${quota.totalGb} `));
+        const em = document.createElement('em'); em.textContent = 'ГБ'; $('#quota-used').append(em);
+        $('#quota-details').textContent = `${quota.percentage}% использовано · ${quota.username}`;
+      }
+      if ($('#account-name')) $('#account-name').textContent = quota.username;
+      if ($('#account-usage')) $('#account-usage').textContent = `${quota.usedGb} / ${quota.totalGb} ГБ · ${quota.percentage}%`;
+    }
+  } catch (_) {}
 }
 function speed(id, value) {
   const [amount, unit] = bytes(value).split(' ');
@@ -255,12 +345,32 @@ $('#copy-mtproto').addEventListener('click', async () => {
     notify('MTProto-ссылка скопирована — вставьте её в Telegram.');
   } catch (error) { notify(`Не удалось скопировать ссылку: ${error}`, true); }
 });
+$('#install-sing-box-btn')?.addEventListener('click', async () => {
+  const btn = $('#install-sing-box-btn');
+  const titleEl = $('#sing-box-status-title');
+  btn.disabled = true;
+  btn.textContent = 'Загрузка...';
+  if (titleEl) titleEl.innerHTML = '⏳ <b>Скачивание и настройка sing-box...</b>';
+  try {
+    await invoke('install_sing_box');
+    notify('Движок sing-box успешно установлен!');
+  } catch (e) {
+    notify(`Ошибка установки sing-box: ${e}`, true);
+  } finally {
+    await refreshSingBoxStatus();
+  }
+});
+$('#app-search')?.addEventListener('input', () => {
+  const selected = $$('#app-list input[name="application"]:checked').map((i) => i.value);
+  renderApps(installedAppsCache, selected);
+});
 (async () => {
   $('#power').disabled = true;
   $('#connect-label').disabled = true;
-  try { populate(await invoke('load_settings')); await poll(); await loadAccount(); }
+  try { populate(await invoke('load_settings')); await poll(); await loadAccount(); await refreshQuota(); }
   catch (error) { notify(error, true); }
   finally { $('#power').disabled = false; $('#connect-label').disabled = false; }
   setInterval(poll, 1500);
   setInterval(probe, 15000);
+  setInterval(refreshQuota, 15000);
 })();

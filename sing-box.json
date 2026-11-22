@@ -1,0 +1,244 @@
+{
+  "log": {
+    "level": "info",
+    "timestamp": true
+  },
+  "dns": {
+    "final": "local-dns",
+    "reverse_mapping": true,
+    "rules": [
+      {
+        "action": "route",
+        "domain_suffix": [
+          "api.telegram.org",
+          "avatars.githubusercontent.com",
+          "avatars0.githubusercontent.com",
+          "avatars1.githubusercontent.com",
+          "avatars2.githubusercontent.com",
+          "avatars3.githubusercontent.com",
+          "avatars4.githubusercontent.com",
+          "avatars5.githubusercontent.com",
+          "avatars6.githubusercontent.com",
+          "avatars7.githubusercontent.com",
+          "avatars8.githubusercontent.com",
+          "camo.githubusercontent.com",
+          "cdn.telesco.pe",
+          "cdn1.telesco.pe",
+          "cdn2.telesco.pe",
+          "cdn3.telesco.pe",
+          "cdn4.telesco.pe",
+          "cdn5.telesco.pe",
+          "cdn6.telesco.pe",
+          "cloud.githubusercontent.com",
+          "core.telegram.org",
+          "desktop.telegram.org",
+          "discord.com",
+          "discord.gg",
+          "discord.media",
+          "discordapp.com",
+          "discordapp.net",
+          "gist.githubusercontent.com",
+          "github.com",
+          "images-ext-1.discordapp.net",
+          "kws2-1.web.telegram.org",
+          "kws2.web.telegram.org",
+          "kws4-1.web.telegram.org",
+          "kws4.web.telegram.org",
+          "macos.telegram.org",
+          "media.discordapp.net",
+          "media.githubusercontent.com",
+          "my.telegram.org",
+          "oauth.telegram.org",
+          "oauth.tg.dev",
+          "objects.githubusercontent.com",
+          "private-user-images.githubusercontent.com",
+          "raw.githubusercontent.com",
+          "release-assets.githubusercontent.com",
+          "rutracker.cc",
+          "rutracker.net",
+          "rutracker.org",
+          "scdn.co",
+          "spotify.com",
+          "spotifycdn.com",
+          "t.me",
+          "td.telegram.org",
+          "telegram.dog",
+          "telegram.me",
+          "telegram.org",
+          "telegram.space",
+          "telesco.pe",
+          "tg.dev",
+          "updates.discord.com",
+          "venus-1.web.telegram.org",
+          "venus.web.telegram.org",
+          "vesta-1.web.telegram.org",
+          "vesta.web.telegram.org",
+          "web.telegram.org",
+          "zws2-1.web.telegram.org",
+          "zws2.web.telegram.org",
+          "zws4-1.web.telegram.org",
+          "zws4.web.telegram.org"
+        ],
+        "query_type": [
+          "A",
+          "AAAA"
+        ],
+        "server": "fake-dns"
+      }
+    ],
+    "servers": [
+      {
+        "tag": "local-dns",
+        "type": "local"
+      },
+      {
+        "inet4_range": "198.18.0.0/15",
+        "inet6_range": "fc00::/18",
+        "tag": "fake-dns",
+        "type": "fakeip"
+      }
+    ]
+  },
+  "inbounds": [
+    {
+      "address": [
+        "172.19.0.1/30",
+        "fdfe:dcba:9876::1/126"
+      ],
+      "auto_route": true,
+      "interface_name": "kasper-tun",
+      "stack": "mixed",
+      "strict_route": true,
+      "tag": "tun-in",
+      "type": "tun"
+    }
+  ],
+  "outbounds": [
+    {
+      "tag": "direct",
+      "type": "direct"
+    },
+    {
+      "server": "127.0.0.1",
+      "server_port": 1080,
+      "tag": "proxy",
+      "type": "socks",
+      "version": "5"
+    }
+  ],
+  "route": {
+    "auto_detect_interface": true,
+    "default_domain_resolver": "local-dns",
+    "final": "direct",
+    "rules": [
+      {
+        "action": "sniff"
+      },
+      {
+        "action": "hijack-dns",
+        "mode": "or",
+        "rules": [
+          {
+            "protocol": "dns"
+          },
+          {
+            "port": 53
+          }
+        ],
+        "type": "logical"
+      },
+      {
+        "action": "route",
+        "domain_suffix": [
+          "api.telegram.org",
+          "avatars.githubusercontent.com",
+          "avatars0.githubusercontent.com",
+          "avatars1.githubusercontent.com",
+          "avatars2.githubusercontent.com",
+          "avatars3.githubusercontent.com",
+          "avatars4.githubusercontent.com",
+          "avatars5.githubusercontent.com",
+          "avatars6.githubusercontent.com",
+          "avatars7.githubusercontent.com",
+          "avatars8.githubusercontent.com",
+          "camo.githubusercontent.com",
+          "cdn.telesco.pe",
+          "cdn1.telesco.pe",
+          "cdn2.telesco.pe",
+          "cdn3.telesco.pe",
+          "cdn4.telesco.pe",
+          "cdn5.telesco.pe",
+          "cdn6.telesco.pe",
+          "cloud.githubusercontent.com",
+          "core.telegram.org",
+          "desktop.telegram.org",
+          "discord.com",
+          "discord.gg",
+          "discord.media",
+          "discordapp.com",
+          "discordapp.net",
+          "gist.githubusercontent.com",
+          "github.com",
+          "images-ext-1.discordapp.net",
+          "kws2-1.web.telegram.org",
+          "kws2.web.telegram.org",
+          "kws4-1.web.telegram.org",
+          "kws4.web.telegram.org",
+          "macos.telegram.org",
+          "media.discordapp.net",
+          "media.githubusercontent.com",
+          "my.telegram.org",
+          "oauth.telegram.org",
+          "oauth.tg.dev",
+          "objects.githubusercontent.com",
+          "private-user-images.githubusercontent.com",
+          "raw.githubusercontent.com",
+          "release-assets.githubusercontent.com",
+          "rutracker.cc",
+          "rutracker.net",
+          "rutracker.org",
+          "scdn.co",
+          "spotify.com",
+          "spotifycdn.com",
+          "t.me",
+          "td.telegram.org",
+          "telegram.dog",
+          "telegram.me",
+          "telegram.org",
+          "telegram.space",
+          "telesco.pe",
+          "tg.dev",
+          "updates.discord.com",
+          "venus-1.web.telegram.org",
+          "venus.web.telegram.org",
+          "vesta-1.web.telegram.org",
+          "vesta.web.telegram.org",
+          "web.telegram.org",
+          "zws2-1.web.telegram.org",
+          "zws2.web.telegram.org",
+          "zws4-1.web.telegram.org",
+          "zws4.web.telegram.org"
+        ],
+        "outbound": "proxy"
+      },
+      {
+        "action": "route",
+        "outbound": "proxy",
+        "process_name": [
+          "Discord",
+          "Discord.exe",
+          "DiscordCanary",
+          "DiscordCanary.exe",
+          "DiscordPTB",
+          "DiscordPTB.exe",
+          "Spotify",
+          "Spotify.exe",
+          "discord",
+          "discordcanary",
+          "discordptb",
+          "spotify"
+        ]
+      }
+    ]
+  }
+}
