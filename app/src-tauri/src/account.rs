@@ -64,24 +64,35 @@ fn validate_vless(link: &str) -> Result<(), String> {
 
 pub struct AccountClient {
     client: reqwest::Client,
-    base: String,
+    bases: Vec<String>,
 }
 
 impl AccountClient {
     pub fn new() -> Result<Self, String> {
-        Self::with_base(API_BASE)
+        Self::with_bases(vec![
+            API_BASE.to_string(),
+            "https://vpn.kasperstudios.xyz:8443".to_string(),
+        ])
     }
 
+    #[cfg(test)]
     fn with_base(base: &str) -> Result<Self, String> {
+        Self::with_bases(vec![base.to_string()])
+    }
+
+    fn with_bases(bases: Vec<String>) -> Result<Self, String> {
         let client = account_http_client()
             .cookie_store(true)
             .user_agent(USER_AGENT)
-            .timeout(Duration::from_secs(20))
+            .timeout(Duration::from_secs(10))
             .build()
             .map_err(|e| format!("Не удалось создать HTTP-клиент: {e}"))?;
         Ok(Self {
             client,
-            base: base.trim_end_matches('/').to_string(),
+            bases: bases
+                .into_iter()
+                .map(|b| b.trim_end_matches('/').to_string())
+                .collect(),
         })
     }
 
@@ -90,76 +101,81 @@ impl AccountClient {
         if username.is_empty() || password.is_empty() {
             return Err("Введите логин и пароль".into());
         }
-        let response = self
-            .client
-            .post(format!("{}/api/login", self.base))
-            .json(&serde_json::json!({"username": username, "password": password}))
-            .send()
-            .await
-            .map_err(|e| format!("Не удалось связаться с KasperVPN: {e}"))?;
-        let status = response.status();
-        let value: Value = response
-            .json()
-            .await
-            .map_err(|e| format!("Некорректный ответ входа: {e}"))?;
-        if !status.is_success() {
-            return Err(message(&value)
-                .unwrap_or("Неверный логин или пароль")
-                .to_string());
+        let mut last_error = String::new();
+        for base in &self.bases {
+            let res = self
+                .client
+                .post(format!("{}/api/login", base))
+                .json(&serde_json::json!({"username": username, "password": password}))
+                .send()
+                .await;
+            match res {
+                Ok(response) => {
+                    let status = response.status();
+                    let value: Value = response
+                        .json()
+                        .await
+                        .map_err(|e| format!("Некорректный ответ входа: {e}"))?;
+                    if !status.is_success() || value.get("ok").and_then(Value::as_bool) == Some(false) {
+                        return Err(message(&value)
+                            .unwrap_or("Неверный логин или пароль")
+                            .to_string());
+                    }
+                    return serde_json::from_value(value)
+                        .map_err(|e| format!("Ответ входа не соответствует API: {e}"));
+                }
+                Err(err) => {
+                    last_error = format!("{err}");
+                }
+            }
         }
-        if value.get("ok").and_then(Value::as_bool) == Some(false) {
-            return Err(message(&value)
-                .unwrap_or("Неверный логин или пароль")
-                .to_string());
-        }
-        serde_json::from_value(value).map_err(|e| format!("Ответ входа не соответствует API: {e}"))
+        Err(format!("Не удалось связаться с KasperVPN: {last_error}"))
     }
 
     pub async fn me(&self) -> Result<Account, String> {
-        let response = self
-            .client
-            .get(format!("{}/api/me", self.base))
-            .send()
-            .await
-            .map_err(|e| format!("Не удалось получить профиль KasperVPN: {e}"))?;
-        let status = response.status();
-        let value: Value = response
-            .json()
-            .await
-            .map_err(|e| format!("Некорректный ответ профиля: {e}"))?;
-        if !status.is_success() {
-            return Err(message(&value)
-                .unwrap_or("Требуется войти в KasperVPN")
-                .to_string());
+        let mut last_error = String::new();
+        for base in &self.bases {
+            let res = self
+                .client
+                .get(format!("{}/api/me", base))
+                .send()
+                .await;
+            match res {
+                Ok(response) => {
+                    let status = response.status();
+                    let value: Value = response
+                        .json()
+                        .await
+                        .map_err(|e| format!("Некорректный ответ профиля: {e}"))?;
+                    if !status.is_success() || value.get("ok").and_then(Value::as_bool) == Some(false) {
+                        return Err(message(&value)
+                            .unwrap_or("Требуется войти в KasperVPN")
+                            .to_string());
+                    }
+                    let used_mb = value
+                        .get("usedMB")
+                        .map(|v| match v {
+                            Value::String(s) => s.clone(),
+                            Value::Number(n) => n.to_string(),
+                            _ => String::new(),
+                        })
+                        .unwrap_or_default();
+                    let account: Account = serde_json::from_value(value)
+                        .map_err(|e| format!("Ответ профиля не соответствует API: {e}"))?;
+                    validate_vless(&account.vless_link)?;
+                    return Ok(Account { used_mb, ..account });
+                }
+                Err(err) => {
+                    last_error = format!("{err}");
+                }
+            }
         }
-        if value.get("ok").and_then(Value::as_bool) == Some(false) {
-            return Err(message(&value)
-                .unwrap_or("Требуется войти в KasperVPN")
-                .to_string());
-        }
-        let used_mb = value
-            .get("usedMB")
-            .map(|v| match v {
-                Value::String(s) => s.clone(),
-                Value::Number(n) => n.to_string(),
-                _ => String::new(),
-            })
-            .unwrap_or_default();
-        let account: Account = serde_json::from_value(value)
-            .map_err(|e| format!("Ответ профиля не соответствует API: {e}"))?;
-        validate_vless(&account.vless_link)?;
-        Ok(Account { used_mb, ..account })
+        Err(format!("Не удалось получить профиль KasperVPN: {last_error}"))
     }
 
     pub async fn logout(&self) -> Result<(), String> {
-        let response = self
-            .client
-            .get(format!("{}/api/logout", self.base))
-            .send()
-            .await
-            .map_err(|e| format!("Не удалось завершить сеанс KasperVPN: {e}"))?;
-        if !response.status().is_success() {
-            return Err("Не удалось завершить сеанс KasperVPN".into());
+        for base in &self.bases {
+            let _ = self.client.get(format!("{}/api/logout", base)).send().await;
         }
         Ok(())
     }

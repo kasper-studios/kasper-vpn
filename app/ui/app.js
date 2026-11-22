@@ -31,7 +31,24 @@ function tab(id) {
   });
 }
 $$('.nav').forEach((button) => button.addEventListener('click', () => tab(button.dataset.tab)));
+function updateSniBadge(sni) {
+  const el = $('#sni-label');
+  if (!el) return;
+  if (!sni || sni === 'auto' || sni === 'gateway.icloud.com') {
+    el.textContent = '🍏 ICLOUD';
+  } else if (sni === 'www.samsung.com') {
+    el.textContent = '📱 SAMSUNG';
+  } else if (sni === 'www.microsoft.com') {
+    el.textContent = '🪟 MICROSOFT';
+  } else {
+    el.textContent = `⚡ ${sni.slice(0, 15).toUpperCase()}`;
+  }
+}
 function collect() {
+  const sniSelected = $('input[name="sni"]:checked')?.value || 'auto';
+  const customSni = $('#custom-sni')?.value.trim();
+  const sni = sniSelected === 'custom' ? (customSni || 'gateway.icloud.com') : sniSelected;
+  const port = $('input[name="port"]:checked')?.value || 'auto';
   return {
     ...(settingsCache || {}),
     key: $('#vless-key').value.trim(),
@@ -41,6 +58,8 @@ function collect() {
     singBoxPath: $('#sing-box-path').value.trim() || 'sing-box',
     mtprotoPort: Number($('#mtproto-port').value) || (settingsCache?.mtprotoPort ?? 17893),
     mtprotoSecret: settingsCache?.mtprotoSecret || '',
+    sni,
+    port,
   };
 }
 function updateAppCount() {
@@ -95,6 +114,22 @@ function populate(settings) {
   $('#mtproto-port').value = settings.mtprotoPort || 17893;
   $$('input[name="application"]').forEach((input) => { input.checked = settings.applications.includes(input.value); });
   $$('input[name="mode"]').forEach((input) => { input.checked = settings.mode === input.value; });
+  const sni = settings.sni || 'auto';
+  const knownSni = ['auto', 'gateway.icloud.com', 'www.samsung.com', 'www.microsoft.com'];
+  if (knownSni.includes(sni)) {
+    $$('input[name="sni"]').forEach((input) => { input.checked = input.value === sni; });
+    const cGroup = $('#custom-sni-group');
+    if (cGroup) cGroup.hidden = true;
+  } else {
+    $$('input[name="sni"]').forEach((input) => { input.checked = input.value === 'custom'; });
+    const cInput = $('#custom-sni');
+    if (cInput) cInput.value = sni;
+    const cGroup = $('#custom-sni-group');
+    if (cGroup) cGroup.hidden = false;
+  }
+  const port = settings.port || 'auto';
+  $$('input[name="port"]').forEach((input) => { input.checked = input.value === port; });
+  updateSniBadge(sni);
   loadInstalledApps(settings.applications || []);
   countDomains();
   refreshMtproto();
@@ -152,6 +187,17 @@ $$('input, textarea').forEach((input) => input.addEventListener('input', () => {
   $$('.save-settings').forEach((button) => { button.textContent = 'Сохранить изменения •'; });
   countDomains();
 }));
+$$('input[name="sni"]').forEach((input) => {
+  input.addEventListener('change', () => {
+    const isCustom = input.value === 'custom';
+    const cGroup = $('#custom-sni-group');
+    if (cGroup) cGroup.hidden = !isCustom;
+    updateSniBadge(isCustom ? ($('#custom-sni')?.value || 'CUSTOM') : input.value);
+  });
+});
+$('#custom-sni')?.addEventListener('input', () => {
+  updateSniBadge($('#custom-sni')?.value || 'CUSTOM');
+});
 $('#show-key').addEventListener('click', () => {
   const hidden = $('#vless-key').type === 'password';
   $('#vless-key').type = hidden ? 'text' : 'password';

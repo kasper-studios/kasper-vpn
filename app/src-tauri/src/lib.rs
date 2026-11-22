@@ -43,6 +43,18 @@ pub struct Settings {
     /// Секрет MTProto-прокси (32 hex-символа). Генерируется при первом запуске.
     #[serde(default)]
     mtproto_secret: String,
+    /// Маскировка TLS/Reality (SNI): "auto", "gateway.icloud.com", "www.samsung.com", "www.microsoft.com", либо свой домен.
+    #[serde(default = "default_sni")]
+    sni: String,
+    /// Порт подключения VLESS: "auto", "443", "8443".
+    #[serde(default = "default_port")]
+    port: String,
+    /// Сохранённый логин аккаунта для автоматической авторизации и автообновления ключа.
+    #[serde(default)]
+    account_username: Option<String>,
+    /// Сохранённый пароль аккаунта для автоматической авторизации и автообновления ключа.
+    #[serde(default)]
+    account_password: Option<String>,
 }
 fn default_mode() -> String {
     "system".into()
@@ -52,6 +64,12 @@ fn default_applications() -> Vec<String> {
 }
 fn default_mtproto_port() -> u16 {
     17893
+}
+fn default_sni() -> String {
+    "auto".into()
+}
+fn default_port() -> String {
+    "auto".into()
 }
 
 impl Default for Settings {
@@ -64,6 +82,10 @@ impl Default for Settings {
             sing_box_path: "sing-box".into(),
             mtproto_port: default_mtproto_port(),
             mtproto_secret: mtproto::generate_secret(),
+            sni: default_sni(),
+            port: default_port(),
+            account_username: None,
+            account_password: None,
         }
     }
 }
@@ -138,7 +160,12 @@ fn vpn_http_client() -> reqwest::ClientBuilder {
         }))
 }
 
+#[allow(dead_code)]
 fn vless(key: &str) -> Result<Value> {
+    vless_configured(key, "auto", "auto")
+}
+
+fn vless_configured(key: &str, sni_override: &str, port_override: &str) -> Result<Value> {
     let url = Url::parse(key.trim()).map_err(|_| "Некорректная VLESS-ссылка")?;
     if url.scheme() != "vless" || url.password().is_some() {
         return Err("Нужна ссылка vless://UUID@server:port".into());
@@ -148,21 +175,28 @@ fn vless(key: &str) -> Result<Value> {
         .host_str()
         .ok_or("В VLESS отсутствует сервер")?
         .trim_matches(['[', ']']);
-    let port = url.port().ok_or("В VLESS отсутствует порт")?;
+    let orig_port = url.port().ok_or("В VLESS отсутствует порт")?;
+    let effective_port = match port_override.trim() {
+        "" | "auto" => orig_port,
+        p => p.parse::<u16>().unwrap_or(orig_port),
+    };
     let params: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
     let get = |name: &str| params.get(name).map(String::as_str).unwrap_or("");
-    let mut out = json!({"type":"vless", "tag":"proxy", "server":host, "server_port":port, "uuid":url.username()});
+    let mut out = json!({"type":"vless", "tag":"proxy", "server":host, "server_port":effective_port, "uuid":url.username()});
     if !get("flow").is_empty() {
         out["flow"] = json!(get("flow"));
     }
     match get("security") {
         "" | "none" => {}
         "tls" | "reality" => {
-            let sni = match get("sni") {
-                "" if get("security") == "reality" => "gateway.icloud.com",
-                "" => host,
-                "dl.delivery.mp.microsoft.com" | "www.microsoft.com" => "gateway.icloud.com",
-                other => other,
+            let sni = match sni_override.trim() {
+                "" | "auto" => match get("sni") {
+                    "" if get("security") == "reality" => "gateway.icloud.com",
+                    "" => host,
+                    "dl.delivery.mp.microsoft.com" | "www.microsoft.com" => "gateway.icloud.com",
+                    other => other,
+                },
+                custom => custom,
             };
             let mut tls = json!({"enabled":true, "server_name": sni});
             if !get("fp").is_empty() {
@@ -309,7 +343,7 @@ fn generate(settings: &Settings, secret: &str) -> Result<Value> {
         proxy_port: 0,
     };
     let mut cfg = serde_json::to_value(policy.generate()).map_err(|e| e.to_string())?;
-    cfg["outbounds"][1] = vless(&settings.key)?;
+    cfg["outbounds"][1] = vless_configured(&settings.key, &settings.sni, &settings.port)?;
     cfg["route"]["find_process"] = json!(true);
     let original_route_rules = cfg["route"]["rules"].as_array().unwrap().clone();
     if settings.mode == "tun" {
@@ -428,13 +462,62 @@ async fn login_account(
 ) -> Result<account::LoginResult> {
     let client = AccountClient::new()?;
     let result = client.login(&username, &password).await?;
+    let account_info = client.me().await?;
     *state.account.lock().await = Some(client);
+
+    let mut session = state.session.lock().await;
+    session.settings.account_username = Some(username);
+    session.settings.account_password = Some(password);
+    if !account_info.vless_link.is_empty() {
+        session.settings.key = account_info.vless_link;
+    }
+    let _ = private_write(
+        &state.dir.join("config.json"),
+        &serde_json::to_string_pretty(&session.settings).unwrap_or_default(),
+    )
+    .await;
+
     Ok(result)
 }
 
 #[tauri::command]
+async fn auto_login_saved_account(state: State<'_, Backend>) -> Result<account::Account> {
+    let (u, p) = {
+        let session = state.session.lock().await;
+        (
+            session.settings.account_username.clone(),
+            session.settings.account_password.clone(),
+        )
+    };
+    if let (Some(username), Some(password)) = (u, p) {
+        if !username.trim().is_empty() && !password.trim().is_empty() {
+            let client = AccountClient::new()?;
+            let _ = client.login(&username, &password).await?;
+            let account_info = client.me().await?;
+            *state.account.lock().await = Some(client);
+
+            let mut session = state.session.lock().await;
+            if !account_info.vless_link.is_empty() {
+                session.settings.key = account_info.vless_link.clone();
+                let _ = private_write(
+                    &state.dir.join("config.json"),
+                    &serde_json::to_string_pretty(&session.settings).unwrap_or_default(),
+                )
+                .await;
+            }
+            return Ok(account_info);
+        }
+    }
+    Err("Сохранённый аккаунт не найден".into())
+}
+
+#[tauri::command]
 async fn current_account(state: State<'_, Backend>) -> Result<account::Account> {
-    let account = state.account.lock().await;
+    let mut account = state.account.lock().await;
+    if account.is_none() {
+        drop(account);
+        return auto_login_saved_account(state).await;
+    }
     account
         .as_ref()
         .ok_or_else(|| "Войдите в аккаунт KasperVPN".to_string())?
@@ -446,8 +529,17 @@ async fn current_account(state: State<'_, Backend>) -> Result<account::Account> 
 async fn logout_account(state: State<'_, Backend>) -> Result<()> {
     let client = state.account.lock().await.take();
     if let Some(client) = client {
-        client.logout().await?;
+        let _ = client.logout().await;
     }
+    let mut session = state.session.lock().await;
+    session.settings.account_username = None;
+    session.settings.account_password = None;
+    session.settings.key.clear();
+    let _ = private_write(
+        &state.dir.join("config.json"),
+        &serde_json::to_string_pretty(&session.settings).unwrap_or_default(),
+    )
+    .await;
     Ok(())
 }
 
@@ -495,16 +587,29 @@ async fn get_account_traffic(state: State<'_, Backend>) -> Result<AccountTraffic
         .timeout(Duration::from_secs(6))
         .build()
         .map_err(|e| e.to_string())?;
-    let response = client
-        .get(format!(
-            "https://vpn.kasperstudios.xyz/api/traffic-status?uuid={uuid}"
-        ))
-        .send()
-        .await
-        .map_err(|e| format!("Ошибка связи с сервером: {e}"))?;
-    if !response.status().is_success() {
-        return Err("Аккаунт по данному ключу не найден".into());
+    let mut response = None;
+    let mut last_err = String::new();
+    for base in &["https://vpn.kasperstudios.xyz", "https://vpn.kasperstudios.xyz:8443"] {
+        match client.get(format!("{base}/api/traffic-status?uuid={uuid}")).send().await {
+            Ok(res) if res.status().is_success() => {
+                response = Some(res);
+                break;
+            }
+            Ok(res) => {
+                last_err = format!("Сервер вернул статус {}", res.status());
+            }
+            Err(e) => {
+                last_err = e.to_string();
+            }
+        }
     }
+    let response = response.ok_or_else(|| {
+        if last_err.is_empty() {
+            "Аккаунт по данному ключу не найден".to_string()
+        } else {
+            format!("Ошибка связи с сервером: {last_err}")
+        }
+    })?;
     let data: Value = response.json().await.map_err(|e| e.to_string())?;
     Ok(AccountTraffic {
         username: data["username"].as_str().unwrap_or("").to_string(),
@@ -787,6 +892,21 @@ async fn install_sing_box(state: State<'_, Backend>) -> Result<SingBoxStatus> {
 }
 
 async fn launch(key: String, mut settings: Settings, backend: &Backend) -> Result<()> {
+    let mut key = key;
+    if key.trim().is_empty() {
+        if let (Some(u), Some(p)) = (&settings.account_username, &settings.account_password) {
+            if let Ok(client) = AccountClient::new() {
+                if client.login(u, p).await.is_ok() {
+                    if let Ok(acc) = client.me().await {
+                        if !acc.vless_link.is_empty() {
+                            key = acc.vless_link.clone();
+                            settings.key = acc.vless_link;
+                        }
+                    }
+                }
+            }
+        }
+    }
     let mut session = backend.session.lock().await;
     if let Some(child) = session.child.as_mut() {
         if child.try_wait().map_err(|e| e.to_string())?.is_none() {
@@ -1169,6 +1289,7 @@ pub fn run() {
             stop_vpn,
             sync_zapret_domains,
             login_account,
+            auto_login_saved_account,
             current_account,
             logout_account,
             clear_account_vless,
@@ -1240,6 +1361,15 @@ mod tests {
         let vless_custom = "vless://4a46d4cd-eebd-405e-a1d0-1666202c8fdc@92.5.238.211:443?security=reality&pbk=EsETgEgCcqwqVq7lGNRlN79ElfE9ekWERL9JWy_i8hY&sid=23&sni=custom.cdn.com";
         let parsed_custom = vless(vless_custom).unwrap();
         assert_eq!(parsed_custom["tls"]["server_name"], "custom.cdn.com");
+
+        // Test explicit SNI overrides
+        let parsed_samsung = vless_configured(vless_ms, "www.samsung.com", "auto").unwrap();
+        assert_eq!(parsed_samsung["tls"]["server_name"], "www.samsung.com");
+        assert_eq!(parsed_samsung["server_port"], 443);
+
+        let parsed_port8443 = vless_configured(vless_ms, "gateway.icloud.com", "8443").unwrap();
+        assert_eq!(parsed_port8443["tls"]["server_name"], "gateway.icloud.com");
+        assert_eq!(parsed_port8443["server_port"], 8443);
     }
 
     #[test]
