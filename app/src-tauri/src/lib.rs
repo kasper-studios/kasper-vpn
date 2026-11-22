@@ -294,11 +294,16 @@ fn generate(settings: &Settings, secret: &str) -> Result<Value> {
             }
         }
     }
-    let parsed_domains = if settings.mode == "tun" || settings.mode == "system" {
+    let mut parsed_domains = if settings.mode == "tun" || settings.mode == "system" {
         parser::parse_domains(&settings.domains)
     } else {
         BTreeSet::new()
     };
+    if !parsed_domains.is_empty() {
+        for d in config::DEFAULT_DOMAINS {
+            parsed_domains.insert((*d).to_string());
+        }
+    }
     let policy = config::SplitTunnel {
         domains: parsed_domains.clone(),
         applications: apps.clone(),
@@ -307,6 +312,7 @@ fn generate(settings: &Settings, secret: &str) -> Result<Value> {
     };
     let mut cfg = serde_json::to_value(policy.generate()).map_err(|e| e.to_string())?;
     cfg["outbounds"][1] = vless(&settings.key)?;
+    cfg["route"]["find_process"] = json!(true);
     let original_route_rules = cfg["route"]["rules"].as_array().unwrap().clone();
     if settings.mode == "tun" {
         cfg["route"]["auto_detect_interface"] = json!(true);
@@ -693,6 +699,23 @@ async fn ensure_sing_box(configured_path: &str, backend: &Backend) -> Result<Pat
             backend.dir.join("sing-box.exe")
         }
     };
+
+    #[cfg(windows)]
+    if let Some(parent) = target_path.parent() {
+        let wintun = parent.join("wintun.dll");
+        if !wintun.exists() {
+            let client = reqwest::Client::builder().no_proxy().build().ok();
+            if let Some(c) = client {
+                if let Ok(resp) = c.get("https://vpn.kasperstudios.xyz/downloads/wintun.dll").send().await {
+                    if resp.status().is_success() {
+                        if let Ok(b) = resp.bytes().await {
+                            let _ = tokio::fs::write(&wintun, &b).await;
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     #[cfg(not(windows))]
     let target_path = backend.dir.join("sing-box");

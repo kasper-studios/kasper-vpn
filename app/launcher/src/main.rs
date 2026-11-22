@@ -9,10 +9,12 @@ use flate2::read::GzDecoder;
 const GZ_DESKTOP: &[u8] = include_bytes!("../payload/desktop.exe.gz");
 const GZ_LOADER: &[u8] = include_bytes!("../payload/WebView2Loader.dll.gz");
 const GZ_SING_BOX: &[u8] = include_bytes!("../payload/sing-box.exe.gz");
+const GZ_WINTUN: &[u8] = include_bytes!("../payload/wintun.dll.gz");
 
-const DESKTOP_SIZE: u64 = 29906295;
+const DESKTOP_SIZE: u64 = 29808460;
 const LOADER_SIZE: u64 = 160320;
 const SING_BOX_SIZE: u64 = 82074624;
+const WINTUN_SIZE: u64 = 427552;
 
 fn unpack_if_needed(target: &PathBuf, gz_data: &[u8], expected_size: u64) -> io::Result<()> {
     if let Ok(meta) = fs::metadata(target) {
@@ -50,10 +52,12 @@ fn main() {
     let exe_path = bin_dir.join("KasperVPN.exe");
     let dll_path = bin_dir.join("WebView2Loader.dll");
     let sing_box_path = bin_dir.join("sing-box.exe");
+    let wintun_path = bin_dir.join("wintun.dll");
 
     let _ = unpack_if_needed(&exe_path, GZ_DESKTOP, DESKTOP_SIZE);
     let _ = unpack_if_needed(&dll_path, GZ_LOADER, LOADER_SIZE);
     let _ = unpack_if_needed(&sing_box_path, GZ_SING_BOX, SING_BOX_SIZE);
+    let _ = unpack_if_needed(&wintun_path, GZ_WINTUN, WINTUN_SIZE);
 
     let mut cmd = Command::new(&exe_path);
     cmd.args(std::env::args().skip(1));

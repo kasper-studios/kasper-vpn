@@ -1,8 +1,13 @@
 use std::{collections::BTreeSet, error::Error, io, net::IpAddr, path::Path, time::Duration};
 
 pub type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
-pub const HOSTS_URL: &str =
-    "https://raw.githubusercontent.com/Flowseal/zapret-discord-youtube/main/.service/hosts";
+pub const ZAPRET_GENERAL_URL: &str =
+    "https://raw.githubusercontent.com/Flowseal/zapret-discord-youtube/main/lists/list-general.txt";
+pub const ZAPRET_GOOGLE_URL: &str =
+    "https://raw.githubusercontent.com/Flowseal/zapret-discord-youtube/main/lists/list-google.txt";
+#[allow(dead_code)]
+pub const HOSTS_URL: &str = ZAPRET_GENERAL_URL;
+#[allow(dead_code)]
 const MAX_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Debug)]
@@ -15,9 +20,8 @@ pub struct DomainList {
 pub fn normalize_domain(value: &str) -> Option<String> {
     let value = value.trim().trim_start_matches('\u{feff}');
     let domain = value
-        .strip_prefix("*.")
-        .unwrap_or(value)
-        .trim_end_matches('.')
+        .trim_start_matches(['^', '*', '.'])
+        .trim_end_matches(['.', '$'])
         .to_ascii_lowercase();
     if domain.len() > 253
         || !domain.contains('.')
@@ -68,17 +72,30 @@ async fn download() -> Result<String> {
         .timeout(Duration::from_secs(25))
         .user_agent(concat!("kasper-vpn/", env!("CARGO_PKG_VERSION")))
         .build()?;
-    let mut response = client.get(HOSTS_URL).send().await?.error_for_status()?;
-    let mut bytes = Vec::new();
-    while let Some(chunk) = response.chunk().await? {
-        if bytes.len() + chunk.len() > MAX_BYTES {
-            return Err(
-                io::Error::new(io::ErrorKind::InvalidData, "hosts response exceeds 4 MiB").into(),
-            );
+
+    let mut combined = String::new();
+
+    if let Ok(response) = client.get(ZAPRET_GENERAL_URL).send().await {
+        if let Ok(text) = response.text().await {
+            combined.push_str(&text);
+            combined.push('\n');
         }
-        bytes.extend_from_slice(&chunk);
     }
-    Ok(String::from_utf8(bytes)?)
+
+    if let Ok(response) = client.get(ZAPRET_GOOGLE_URL).send().await {
+        if let Ok(text) = response.text().await {
+            combined.push_str(&text);
+            combined.push('\n');
+        }
+    }
+
+    if combined.trim().is_empty() {
+        return Err(
+            io::Error::new(io::ErrorKind::Other, "Не удалось загрузить списки доменов zapret с GitHub").into(),
+        );
+    }
+
+    Ok(combined)
 }
 
 pub async fn write_atomic(path: &Path, content: &str) -> Result<()> {

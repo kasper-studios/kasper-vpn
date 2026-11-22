@@ -3,18 +3,52 @@ use std::collections::BTreeSet;
 use serde::Serialize;
 use serde_json::{Value, json};
 
-const DEFAULT_DOMAINS: &[&str] = &[
+pub const DEFAULT_DOMAINS: &[&str] = &[
+    // Discord (All API, Media, Voice RTC, CDN, Gateway)
     "discord.com",
     "discord.gg",
     "discordapp.com",
     "discordapp.net",
     "discord.media",
+    "discord.co",
+    "discord.app",
+    "discord.dev",
+    "discord.new",
+    "discord.gift",
+    "discord.gifts",
+    "discord.status",
+    "discordstatus.com",
+    "dis.gd",
+    "discordcdn.com",
+    "discordmerch.com",
+    "discordpartygames.com",
+    "discordsays.com",
+    "discordsez.com",
+    "discord-activities.com",
+    "discordactivities.com",
+    "discord-attachments-uploads-prd.storage.googleapis.com",
+    "stable.dl2.discordapp.net",
+    // YouTube & Google Video
+    "youtube.com",
+    "youtu.be",
+    "googlevideo.com",
+    "ytimg.com",
+    "ggpht.com",
+    "youtubei.googleapis.com",
+    "youtubeembeddedplayer.googleapis.com",
+    "youtubekids.com",
+    "yt3.ggpht.com",
+    "yt4.ggpht.com",
+    // Spotify & Audio
     "spotify.com",
     "scdn.co",
     "spotifycdn.com",
+    // Common blocked
     "rutracker.org",
     "rutracker.net",
     "rutracker.cc",
+    "nnmclub.to",
+    "notion.so",
 ];
 const DEFAULT_APPS: &[&str] = &[
     "Discord",
