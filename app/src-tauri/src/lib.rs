@@ -119,7 +119,9 @@ fn is_loopback_target(host: &str) -> bool {
     let host = host.trim_matches(['[', ']']).to_ascii_lowercase();
     host == "localhost"
         || host == "localhost.localdomain"
-        || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback())
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
 }
 
 fn vpn_http_client() -> reqwest::ClientBuilder {
@@ -157,8 +159,9 @@ fn vless(key: &str) -> Result<Value> {
         "" | "none" => {}
         "tls" | "reality" => {
             let sni = match get("sni") {
+                "" if get("security") == "reality" => "gateway.icloud.com",
                 "" => host,
-                "dl.delivery.mp.microsoft.com" => "www.microsoft.com",
+                "dl.delivery.mp.microsoft.com" | "www.microsoft.com" => "gateway.icloud.com",
                 other => other,
             };
             let mut tls = json!({"enabled":true, "server_name": sni});
@@ -275,14 +278,9 @@ fn generate(settings: &Settings, secret: &str) -> Result<Value> {
                 }
                 "telegram" => {
                     apps.extend(
-                        [
-                            "telegram-desktop",
-                            "Telegram",
-                            "Telegram.exe",
-                            "telegram",
-                        ]
-                        .iter()
-                        .map(|s| s.to_string()),
+                        ["telegram-desktop", "Telegram", "Telegram.exe", "telegram"]
+                            .iter()
+                            .map(|s| s.to_string()),
                     );
                 }
                 _ => {
@@ -321,9 +319,12 @@ fn generate(settings: &Settings, secret: &str) -> Result<Value> {
         cfg["inbounds"].as_array_mut().unwrap().push(json!({
             "type":"mixed", "tag":"metrics-in", "listen":"127.0.0.1", "listen_port":17892
         }));
-        cfg["route"]["rules"].as_array_mut().unwrap().insert(1, json!({
-            "inbound": "metrics-in", "action": "route", "outbound": "proxy"
-        }));
+        cfg["route"]["rules"].as_array_mut().unwrap().insert(
+            1,
+            json!({
+                "inbound": "metrics-in", "action": "route", "outbound": "proxy"
+            }),
+        );
     } else {
         cfg["dns"]["rules"] = json!([]);
         cfg["dns"]["servers"] = json!([{"type":"local", "tag":"local-dns"}]);
@@ -358,11 +359,14 @@ fn generate(settings: &Settings, secret: &str) -> Result<Value> {
             let has_apps = !apps.is_empty();
             if has_domains {
                 let dom_vec: Vec<_> = parsed_domains.iter().collect();
-                rules.push(json!({"domain_suffix": dom_vec, "action": "route", "outbound": "proxy"}));
+                rules.push(
+                    json!({"domain_suffix": dom_vec, "action": "route", "outbound": "proxy"}),
+                );
             }
             if has_apps {
                 let app_vec: Vec<_> = apps.iter().collect();
-                rules.push(json!({"process_name": app_vec, "action": "route", "outbound": "proxy"}));
+                rules
+                    .push(json!({"process_name": app_vec, "action": "route", "outbound": "proxy"}));
             }
             if !has_domains && !has_apps {
                 rules.push(json!({"inbound": "local-in", "action": "route", "outbound": "proxy"}));
@@ -380,7 +384,11 @@ fn generate(settings: &Settings, secret: &str) -> Result<Value> {
             rules.extend(
                 original_route_rules
                     .iter()
-                    .filter(|r| r.get("domain_suffix").is_none() && r.get("process_name").is_none() && r.get("action") != Some(&json!("sniff")))
+                    .filter(|r| {
+                        r.get("domain_suffix").is_none()
+                            && r.get("process_name").is_none()
+                            && r.get("action") != Some(&json!("sniff"))
+                    })
                     .cloned(),
             );
             json!(rules)
@@ -488,7 +496,9 @@ async fn get_account_traffic(state: State<'_, Backend>) -> Result<AccountTraffic
         .build()
         .map_err(|e| e.to_string())?;
     let response = client
-        .get(format!("https://vpn.kasperstudios.xyz/api/traffic-status?uuid={uuid}"))
+        .get(format!(
+            "https://vpn.kasperstudios.xyz/api/traffic-status?uuid={uuid}"
+        ))
         .send()
         .await
         .map_err(|e| format!("Ошибка связи с сервером: {e}"))?;
@@ -561,7 +571,10 @@ async fn test_sing_box_command(binary: &str) -> Option<String> {
     None
 }
 
-async fn find_existing_sing_box(configured_path: &str, backend: &Backend) -> Option<(PathBuf, String)> {
+async fn find_existing_sing_box(
+    configured_path: &str,
+    backend: &Backend,
+) -> Option<(PathBuf, String)> {
     let trimmed = configured_path.trim();
     if !trimmed.is_empty() && trimmed != "sing-box" && trimmed != "sing-box.exe" {
         let p = PathBuf::from(trimmed);
@@ -589,7 +602,12 @@ async fn find_existing_sing_box(configured_path: &str, backend: &Backend) -> Opt
     #[cfg(windows)]
     {
         if let Ok(local) = std::env::var("LOCALAPPDATA") {
-            candidates.push(PathBuf::from(local).join("KasperVPN").join("bin").join("sing-box.exe"));
+            candidates.push(
+                PathBuf::from(local)
+                    .join("KasperVPN")
+                    .join("bin")
+                    .join("sing-box.exe"),
+            );
         }
     }
 
@@ -599,7 +617,11 @@ async fn find_existing_sing_box(configured_path: &str, backend: &Backend) -> Opt
         }
     }
 
-    let path_bin = if cfg!(windows) { "sing-box.exe" } else { "sing-box" };
+    let path_bin = if cfg!(windows) {
+        "sing-box.exe"
+    } else {
+        "sing-box"
+    };
     if let Some(v) = test_sing_box_command(path_bin).await {
         return Some((PathBuf::from(path_bin), v));
     }
@@ -631,17 +653,15 @@ async fn download_sing_box(dest: &Path) -> Result<PathBuf> {
 
     for url in urls {
         match client.get(&url).send().await {
-            Ok(resp) if resp.status().is_success() => {
-                match resp.bytes().await {
-                    Ok(b) => {
-                        success_bytes = Some(b.to_vec());
-                        break;
-                    }
-                    Err(e) => {
-                        last_err = format!("Ошибка загрузки {url}: {e}");
-                    }
+            Ok(resp) if resp.status().is_success() => match resp.bytes().await {
+                Ok(b) => {
+                    success_bytes = Some(b.to_vec());
+                    break;
                 }
-            }
+                Err(e) => {
+                    last_err = format!("Ошибка загрузки {url}: {e}");
+                }
+            },
             Ok(resp) => {
                 last_err = format!("Сервер {url} вернул статус {}", resp.status());
             }
@@ -651,12 +671,13 @@ async fn download_sing_box(dest: &Path) -> Result<PathBuf> {
         }
     }
 
-    let bytes = success_bytes.ok_or_else(|| {
-        format!("Не удалось автоматически скачать sing-box: {last_err}")
-    })?;
+    let bytes = success_bytes
+        .ok_or_else(|| format!("Не удалось автоматически скачать sing-box: {last_err}"))?;
 
     if let Some(parent) = dest.parent() {
-        tokio::fs::create_dir_all(parent).await.map_err(|e| e.to_string())?;
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| e.to_string())?;
     }
 
     let tmp = dest.with_extension("downloading");
@@ -706,7 +727,11 @@ async fn ensure_sing_box(configured_path: &str, backend: &Backend) -> Result<Pat
         if !wintun.exists() {
             let client = reqwest::Client::builder().no_proxy().build().ok();
             if let Some(c) = client {
-                if let Ok(resp) = c.get("https://vpn.kasperstudios.xyz/downloads/wintun.dll").send().await {
+                if let Ok(resp) = c
+                    .get("https://vpn.kasperstudios.xyz/downloads/wintun.dll")
+                    .send()
+                    .await
+                {
                     if resp.status().is_success() {
                         if let Ok(b) = resp.bytes().await {
                             let _ = tokio::fs::write(&wintun, &b).await;
@@ -751,7 +776,9 @@ async fn get_sing_box_status(state: State<'_, Backend>) -> Result<SingBoxStatus>
 async fn install_sing_box(state: State<'_, Backend>) -> Result<SingBoxStatus> {
     let settings = state.session.lock().await.settings.clone();
     let path = ensure_sing_box(&settings.sing_box_path, &state).await?;
-    let version = test_sing_box_version(&path).await.unwrap_or_else(|| "sing-box (установлен)".to_string());
+    let version = test_sing_box_version(&path)
+        .await
+        .unwrap_or_else(|| "sing-box (установлен)".to_string());
     Ok(SingBoxStatus {
         installed: true,
         path: path.to_string_lossy().to_string(),
@@ -796,9 +823,7 @@ async fn launch(key: String, mut settings: Settings, backend: &Backend) -> Resul
     let checked = tokio::time::timeout(Duration::from_secs(15), check)
         .await
         .map_err(|_| "Проверка sing-box превысила 15 секунд")?
-        .map_err(|e| {
-            format!("Ошибка запуска sing-box ({}): {e}", settings.sing_box_path)
-        })?;
+        .map_err(|e| format!("Ошибка запуска sing-box ({}): {e}", settings.sing_box_path))?;
     if !checked.status.success() {
         return Err(format!(
             "sing-box check: {}",
@@ -840,8 +865,8 @@ async fn launch(key: String, mut settings: Settings, backend: &Backend) -> Resul
         }
     }
     if settings.mode == "telegram" {
-        let secret = mtproto::parse_secret(&settings.mtproto_secret)
-            .ok_or("Некорректный секрет MTProto")?;
+        let secret =
+            mtproto::parse_secret(&settings.mtproto_secret).ok_or("Некорректный секрет MTProto")?;
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", settings.mtproto_port))
             .await
             .map_err(|e| {
@@ -907,9 +932,8 @@ async fn mtproto_link(state: State<'_, Backend>) -> Result<MtprotoLink> {
         session.settings.mtproto_secret = mtproto::generate_secret();
     }
     let secret = session.settings.mtproto_secret.trim().to_owned();
-    let link = mtproto::parse_secret(&secret).map(|_| {
-        mtproto::proxy_link("127.0.0.1", session.settings.mtproto_port, &secret)
-    });
+    let link = mtproto::parse_secret(&secret)
+        .map(|_| mtproto::proxy_link("127.0.0.1", session.settings.mtproto_port, &secret));
     Ok(MtprotoLink { link, running })
 }
 
@@ -1204,6 +1228,21 @@ mod tests {
         assert!(generate(&s, "secret").is_err());
     }
     #[test]
+    fn vless_reality_migrates_blocked_snis() {
+        let vless_ms = "vless://4a46d4cd-eebd-405e-a1d0-1666202c8fdc@92.5.238.211:443?security=reality&pbk=EsETgEgCcqwqVq7lGNRlN79ElfE9ekWERL9JWy_i8hY&sid=23&sni=www.microsoft.com";
+        let parsed_ms = vless(vless_ms).unwrap();
+        assert_eq!(parsed_ms["tls"]["server_name"], "gateway.icloud.com");
+
+        let vless_empty_sni = "vless://4a46d4cd-eebd-405e-a1d0-1666202c8fdc@92.5.238.211:443?security=reality&pbk=EsETgEgCcqwqVq7lGNRlN79ElfE9ekWERL9JWy_i8hY&sid=23";
+        let parsed_empty = vless(vless_empty_sni).unwrap();
+        assert_eq!(parsed_empty["tls"]["server_name"], "gateway.icloud.com");
+
+        let vless_custom = "vless://4a46d4cd-eebd-405e-a1d0-1666202c8fdc@92.5.238.211:443?security=reality&pbk=EsETgEgCcqwqVq7lGNRlN79ElfE9ekWERL9JWy_i8hY&sid=23&sni=custom.cdn.com";
+        let parsed_custom = vless(vless_custom).unwrap();
+        assert_eq!(parsed_custom["tls"]["server_name"], "custom.cdn.com");
+    }
+
+    #[test]
     fn tun_and_empty_selection() {
         let mut s = settings();
         s.mode = "tun".into();
@@ -1226,7 +1265,14 @@ mod tests {
             assert_eq!(cfg["route"]["final"], "direct");
             assert_eq!(cfg["route"]["rules"][0]["action"], "sniff");
             assert_eq!(cfg["route"]["rules"][1]["outbound"], "direct");
-            assert!(cfg["route"]["rules"].as_array().unwrap().iter().any(|r| r.get("inbound") == Some(&json!("metrics-in")) && r["outbound"] == "proxy"));
+            assert!(
+                cfg["route"]["rules"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|r| r.get("inbound") == Some(&json!("metrics-in"))
+                        && r["outbound"] == "proxy")
+            );
             assert_eq!(cfg["outbounds"][1]["type"], "vless");
             assert_eq!(cfg["outbounds"][1]["server"], "example.com");
             assert_ne!(cfg["outbounds"][1]["server_port"], 17890);
@@ -1241,7 +1287,11 @@ mod tests {
         s.applications.clear();
         let cfg = generate(&s, "secret").unwrap();
         let rules = cfg["route"]["rules"].as_array().unwrap();
-        assert!(rules.iter().any(|r| r.get("inbound") == Some(&json!("local-in")) && r["outbound"] == "proxy"));
+        assert!(
+            rules
+                .iter()
+                .any(|r| r.get("inbound") == Some(&json!("local-in")) && r["outbound"] == "proxy")
+        );
     }
 
     #[test]
