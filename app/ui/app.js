@@ -31,6 +31,17 @@ function tab(id) {
   });
 }
 $$('.nav').forEach((button) => button.addEventListener('click', () => tab(button.dataset.tab)));
+function updateServerBadge(server) {
+  const el = $('#server-label');
+  if (!el) return;
+  if (server === '18.185.148.63') {
+    el.textContent = '🇩🇪 ФРАНКФУРТ';
+  } else if (server === '92.5.238.211') {
+    el.textContent = '🛡️ РЕЗЕРВНЫЙ';
+  } else {
+    el.textContent = '🇳🇱 АМСТЕРДАМ';
+  }
+}
 function updateSniBadge(sni) {
   const el = $('#sni-label');
   if (!el) return;
@@ -45,6 +56,7 @@ function updateSniBadge(sni) {
   }
 }
 function collect() {
+  const server = $('input[name="server"]:checked')?.value || 'auto';
   const sniSelected = $('input[name="sni"]:checked')?.value || 'auto';
   const customSni = $('#custom-sni')?.value.trim();
   const sni = sniSelected === 'custom' ? (customSni || 'gateway.icloud.com') : sniSelected;
@@ -60,6 +72,7 @@ function collect() {
     mtprotoSecret: settingsCache?.mtprotoSecret || '',
     sni,
     port,
+    server,
   };
 }
 function updateAppCount() {
@@ -129,6 +142,9 @@ function populate(settings) {
   }
   const port = settings.port || 'auto';
   $$('input[name="port"]').forEach((input) => { input.checked = input.value === port; });
+  const server = settings.server || 'auto';
+  $$('input[name="server"]').forEach((input) => { input.checked = input.value === server; });
+  updateServerBadge(server);
   updateSniBadge(sni);
   loadInstalledApps(settings.applications || []);
   countDomains();
@@ -187,6 +203,11 @@ $$('input, textarea').forEach((input) => input.addEventListener('input', () => {
   $$('.save-settings').forEach((button) => { button.textContent = 'Сохранить изменения •'; });
   countDomains();
 }));
+$$('input[name="server"]').forEach((input) => {
+  input.addEventListener('change', () => {
+    updateServerBadge(input.value);
+  });
+});
 $$('input[name="sni"]').forEach((input) => {
   input.addEventListener('change', () => {
     const isCustom = input.value === 'custom';

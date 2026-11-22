@@ -49,6 +49,9 @@ pub struct Settings {
     /// Порт подключения VLESS: "auto", "443", "8443".
     #[serde(default = "default_port")]
     port: String,
+    /// Сервер подключения VLESS: "auto", "84.235.165.153", "18.185.148.63", "92.5.238.211".
+    #[serde(default = "default_server")]
+    server: String,
     /// Сохранённый логин аккаунта для автоматической авторизации и автообновления ключа.
     #[serde(default)]
     account_username: Option<String>,
@@ -71,6 +74,9 @@ fn default_sni() -> String {
 fn default_port() -> String {
     "auto".into()
 }
+fn default_server() -> String {
+    "auto".into()
+}
 
 impl Default for Settings {
     fn default() -> Self {
@@ -84,6 +90,7 @@ impl Default for Settings {
             mtproto_secret: mtproto::generate_secret(),
             sni: default_sni(),
             port: default_port(),
+            server: default_server(),
             account_username: None,
             account_password: None,
         }
@@ -162,19 +169,28 @@ fn vpn_http_client() -> reqwest::ClientBuilder {
 
 #[allow(dead_code)]
 fn vless(key: &str) -> Result<Value> {
-    vless_configured(key, "auto", "auto")
+    vless_configured(key, "auto", "auto", "auto")
 }
 
-fn vless_configured(key: &str, sni_override: &str, port_override: &str) -> Result<Value> {
+fn vless_configured(
+    key: &str,
+    sni_override: &str,
+    port_override: &str,
+    server_override: &str,
+) -> Result<Value> {
     let url = Url::parse(key.trim()).map_err(|_| "Некорректная VLESS-ссылка")?;
     if url.scheme() != "vless" || url.password().is_some() {
         return Err("Нужна ссылка vless://UUID@server:port".into());
     }
     uuid::Uuid::parse_str(url.username()).map_err(|_| "Некорректный UUID VLESS")?;
-    let host = url
+    let orig_host = url
         .host_str()
         .ok_or("В VLESS отсутствует сервер")?
         .trim_matches(['[', ']']);
+    let host = match server_override.trim() {
+        "" | "auto" => orig_host,
+        custom => custom,
+    };
     let orig_port = url.port().ok_or("В VLESS отсутствует порт")?;
     let effective_port = match port_override.trim() {
         "" | "auto" => orig_port,
@@ -343,7 +359,7 @@ fn generate(settings: &Settings, secret: &str) -> Result<Value> {
         proxy_port: 0,
     };
     let mut cfg = serde_json::to_value(policy.generate()).map_err(|e| e.to_string())?;
-    cfg["outbounds"][1] = vless_configured(&settings.key, &settings.sni, &settings.port)?;
+    cfg["outbounds"][1] = vless_configured(&settings.key, &settings.sni, &settings.port, &settings.server)?;
     cfg["route"]["find_process"] = json!(true);
     let original_route_rules = cfg["route"]["rules"].as_array().unwrap().clone();
     if settings.mode == "tun" {
@@ -513,7 +529,7 @@ async fn auto_login_saved_account(state: State<'_, Backend>) -> Result<account::
 
 #[tauri::command]
 async fn current_account(state: State<'_, Backend>) -> Result<account::Account> {
-    let mut account = state.account.lock().await;
+    let account = state.account.lock().await;
     if account.is_none() {
         drop(account);
         return auto_login_saved_account(state).await;
@@ -1363,13 +1379,20 @@ mod tests {
         assert_eq!(parsed_custom["tls"]["server_name"], "custom.cdn.com");
 
         // Test explicit SNI overrides
-        let parsed_samsung = vless_configured(vless_ms, "www.samsung.com", "auto").unwrap();
+        let parsed_samsung = vless_configured(vless_ms, "www.samsung.com", "auto", "auto").unwrap();
         assert_eq!(parsed_samsung["tls"]["server_name"], "www.samsung.com");
         assert_eq!(parsed_samsung["server_port"], 443);
+        assert_eq!(parsed_samsung["server"], "92.5.238.211");
 
-        let parsed_port8443 = vless_configured(vless_ms, "gateway.icloud.com", "8443").unwrap();
+        let parsed_port8443 = vless_configured(vless_ms, "gateway.icloud.com", "8443", "auto").unwrap();
         assert_eq!(parsed_port8443["tls"]["server_name"], "gateway.icloud.com");
         assert_eq!(parsed_port8443["server_port"], 8443);
+        assert_eq!(parsed_port8443["server"], "92.5.238.211");
+
+        let parsed_server = vless_configured(vless_ms, "auto", "auto", "84.235.165.153").unwrap();
+        assert_eq!(parsed_server["server"], "84.235.165.153");
+        assert_eq!(parsed_server["server_port"], 443);
+        assert_eq!(parsed_server["tls"]["server_name"], "gateway.icloud.com");
     }
 
     #[test]
