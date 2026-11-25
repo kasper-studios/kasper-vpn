@@ -251,6 +251,20 @@ fn vless_configured(
     Ok(out)
 }
 
+#[cfg(any(windows, test))]
+fn windows_tun_interface_name(secret: &str) -> String {
+    let suffix: String = secret
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .take(6)
+        .collect();
+    if suffix.is_empty() {
+        "kasper-tun".to_string()
+    } else {
+        format!("kasper-{suffix}")
+    }
+}
+
 fn generate(settings: &Settings, secret: &str) -> Result<Value> {
     let normalized_mode = migrate_mode(&settings.mode).to_owned();
     let settings = Settings {
@@ -363,6 +377,10 @@ fn generate(settings: &Settings, secret: &str) -> Result<Value> {
     cfg["route"]["find_process"] = json!(true);
     let original_route_rules = cfg["route"]["rules"].as_array().unwrap().clone();
     if settings.mode == "tun" {
+        #[cfg(windows)]
+        if let Some(tun) = cfg["inbounds"].as_array_mut().and_then(|arr| arr.get_mut(0)) {
+            tun["interface_name"] = json!(windows_tun_interface_name(secret));
+        }
         cfg["route"]["auto_detect_interface"] = json!(true);
         cfg["route"]["default_domain_resolver"] = json!({"server":"local-dns"});
         cfg["outbounds"][1]["domain_resolver"] = json!({"server":"local-dns"});
@@ -907,6 +925,151 @@ async fn install_sing_box(state: State<'_, Backend>) -> Result<SingBoxStatus> {
     })
 }
 
+async fn cleanup_stale_sing_box(dir: &Path) {
+    let pid_path = dir.join("sing-box.pid");
+    let Ok(raw) = tokio::fs::read_to_string(&pid_path).await else {
+        return;
+    };
+    let _ = tokio::fs::remove_file(&pid_path).await;
+    let Ok(pid) = raw.trim().parse::<u32>() else {
+        return;
+    };
+
+    #[cfg(windows)]
+    {
+        if let Ok(out) = command("taskkill")
+            .args([
+                "/FI",
+                "IMAGENAME eq sing-box.exe",
+                "/PID",
+                &pid.to_string(),
+                "/T",
+                "/F",
+            ])
+            .output()
+            .await
+        {
+            if out.status.success() {
+                tokio::time::sleep(Duration::from_millis(350)).await;
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    {
+        if let Ok(out) = command("ps")
+            .args(["-p", &pid.to_string(), "-o", "comm="])
+            .output()
+            .await
+        {
+            if out.status.success() && String::from_utf8_lossy(&out.stdout).contains("sing-box") {
+                let _ = command("kill")
+                    .args(["-TERM", &pid.to_string()])
+                    .status()
+                    .await;
+                tokio::time::sleep(Duration::from_millis(300)).await;
+            }
+        }
+    }
+}
+
+fn is_tun_adapter_collision(err_msg: &str) -> bool {
+    let lower = err_msg.to_ascii_lowercase();
+    lower.contains("cannot create a file when that file already exists")
+        || lower.contains("open existing adapter")
+        || lower.contains("configure tun interface")
+}
+
+async fn wait_sing_box_ready(child: &mut Child, dir: &Path, mode: &str) -> Result<()> {
+    let timeout = if mode == "tun" {
+        Duration::from_secs(18)
+    } else {
+        Duration::from_secs(4)
+    };
+    let deadline = Instant::now() + timeout;
+    let log_path = dir.join("sing-box.log");
+    let pid_path = dir.join("sing-box.pid");
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    loop {
+        if let Some(exit) = child.try_wait().map_err(|e| e.to_string())? {
+            let _ = tokio::fs::remove_file(&pid_path).await;
+            let log = tokio::fs::read_to_string(&log_path).await.unwrap_or_default();
+            return Err(format!(
+                "sing-box завершился ({exit}). {log}\nДля TUN нужны права администратора / CAP_NET_ADMIN; без них используйте локальный прокси."
+            ));
+        }
+
+        if let Ok(log) = tokio::fs::read_to_string(&log_path).await {
+            if log.contains("sing-box started (") {
+                return Ok(());
+            }
+        }
+
+        if Instant::now() >= deadline {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+}
+
+async fn spawn_sing_box_attempt(
+    settings: &Settings,
+    backend: &Backend,
+    secret: &str,
+) -> Result<Child> {
+    let cfg = generate(settings, secret)?;
+    let path = backend.dir.join("sing-box.json");
+    private_write(
+        &path,
+        &serde_json::to_string_pretty(&cfg).map_err(|e| e.to_string())?,
+    )
+    .await?;
+
+    let check = command(&settings.sing_box_path)
+        .arg("check")
+        .arg("-c")
+        .arg(&path)
+        .output();
+    let checked = tokio::time::timeout(Duration::from_secs(15), check)
+        .await
+        .map_err(|_| "Проверка sing-box превысила 15 секунд")?
+        .map_err(|e| format!("Ошибка запуска sing-box ({}): {e}", settings.sing_box_path))?;
+    if !checked.status.success() {
+        return Err(format!(
+            "sing-box check: {}",
+            String::from_utf8_lossy(&checked.stderr)
+        ));
+    }
+
+    private_write(&backend.dir.join("sing-box.log"), "").await?;
+    let log = std::fs::OpenOptions::new()
+        .append(true)
+        .open(backend.dir.join("sing-box.log"))
+        .map_err(|e| e.to_string())?;
+    let mut child = command(&settings.sing_box_path)
+        .args(["run", "-c"])
+        .arg(&path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(log))
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| e.to_string())?;
+
+    if let Some(pid) = child.id() {
+        let _ = private_write(&backend.dir.join("sing-box.pid"), &pid.to_string()).await;
+    }
+
+    if let Err(err) = wait_sing_box_ready(&mut child, &backend.dir, &settings.mode).await {
+        let _ = child.kill().await;
+        let _ = tokio::fs::remove_file(backend.dir.join("sing-box.pid")).await;
+        return Err(err);
+    }
+
+    Ok(child)
+}
+
 async fn launch(key: String, mut settings: Settings, backend: &Backend) -> Result<()> {
     let mut key = key;
     if key.trim().is_empty() {
@@ -930,6 +1093,8 @@ async fn launch(key: String, mut settings: Settings, backend: &Backend) -> Resul
         }
     }
     session.child = None;
+    cleanup_stale_sing_box(&backend.dir).await;
+
     if settings.mode == "proxy" {
         settings.mode = "system".into();
     }
@@ -939,82 +1104,56 @@ async fn launch(key: String, mut settings: Settings, backend: &Backend) -> Resul
     if settings.mode == "telegram" && mtproto::parse_secret(&settings.mtproto_secret).is_none() {
         settings.mtproto_secret = mtproto::generate_secret();
     }
-    let secret = uuid::Uuid::new_v4().to_string();
-    let cfg = generate(&settings, &secret)?;
-    let path = backend.dir.join("sing-box.json");
-    private_write(
-        &path,
-        &serde_json::to_string_pretty(&cfg).map_err(|e| e.to_string())?,
-    )
-    .await?;
 
     let resolved_sing_box = ensure_sing_box(&settings.sing_box_path, backend).await?;
     settings.sing_box_path = resolved_sing_box.to_string_lossy().to_string();
 
-    let check = command(&settings.sing_box_path)
-        .arg("check")
-        .arg("-c")
-        .arg(&path)
-        .output();
-    let checked = tokio::time::timeout(Duration::from_secs(15), check)
-        .await
-        .map_err(|_| "Проверка sing-box превысила 15 секунд")?
-        .map_err(|e| format!("Ошибка запуска sing-box ({}): {e}", settings.sing_box_path))?;
-    if !checked.status.success() {
-        return Err(format!(
-            "sing-box check: {}",
-            String::from_utf8_lossy(&checked.stderr)
-        ));
-    }
+    let mut secret = uuid::Uuid::new_v4().to_string();
+    let mut child = match spawn_sing_box_attempt(&settings, backend, &secret).await {
+        Ok(c) => c,
+        Err(first_err) if settings.mode == "tun" && is_tun_adapter_collision(&first_err) => {
+            // If Windows Wintun reports a torn-down or wedged adapter, retry immediately with a new interface name.
+            tokio::time::sleep(Duration::from_millis(350)).await;
+            secret = uuid::Uuid::new_v4().to_string();
+            spawn_sing_box_attempt(&settings, backend, &secret).await?
+        }
+        Err(err) => return Err(err),
+    };
+
     private_write(
         &backend.dir.join("config.json"),
         &serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?,
     )
     .await?;
-    private_write(&backend.dir.join("sing-box.log"), "").await?;
-    let log = std::fs::OpenOptions::new()
-        .append(true)
-        .open(backend.dir.join("sing-box.log"))
-        .map_err(|e| e.to_string())?;
-    let mut child = command(&settings.sing_box_path)
-        .args(["run", "-c"])
-        .arg(path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::from(log))
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|e| e.to_string())?;
-    tokio::time::sleep(Duration::from_millis(700)).await;
-    if let Some(exit) = child.try_wait().map_err(|e| e.to_string())? {
-        let log = tokio::fs::read_to_string(backend.dir.join("sing-box.log"))
-            .await
-            .unwrap_or_default();
-        return Err(format!(
-            "sing-box завершился ({exit}). {log}\nДля TUN нужны права администратора / CAP_NET_ADMIN; без них используйте локальный прокси."
-        ));
-    }
+
     if settings.mode == "system" {
         if let Err(error) = system_proxy::enable() {
             let _ = child.kill().await;
+            let _ = tokio::fs::remove_file(backend.dir.join("sing-box.pid")).await;
             return Err(error);
         }
     }
     if settings.mode == "telegram" {
-        let secret =
-            mtproto::parse_secret(&settings.mtproto_secret).ok_or("Некорректный секрет MTProto")?;
-        let listener = tokio::net::TcpListener::bind(("127.0.0.1", settings.mtproto_port))
-            .await
-            .map_err(|e| {
-                let _ = child.start_kill();
-                format!(
+        let Some(mtproto_secret) = mtproto::parse_secret(&settings.mtproto_secret) else {
+            let _ = child.kill().await;
+            let _ = tokio::fs::remove_file(backend.dir.join("sing-box.pid")).await;
+            return Err("Некорректный секрет MTProto".into());
+        };
+        let listener = match tokio::net::TcpListener::bind(("127.0.0.1", settings.mtproto_port)).await
+        {
+            Ok(l) => l,
+            Err(e) => {
+                let _ = child.kill().await;
+                let _ = tokio::fs::remove_file(backend.dir.join("sing-box.pid")).await;
+                return Err(format!(
                     "Не удалось занять порт {} для MTProto-прокси: {e}",
                     settings.mtproto_port
-                )
-            })?;
+                ));
+            }
+        };
         // Трафик MTProto уходит в mixed-вход sing-box и дальше через VLESS.
         let task = tokio::spawn(async move {
-            let _ = mtproto::run(listener, secret, Some((String::from("127.0.0.1"), 17890))).await;
+            let _ = mtproto::run(listener, mtproto_secret, Some((String::from("127.0.0.1"), 17890))).await;
         });
         session.mtproto = Some(task);
     }
@@ -1078,6 +1217,7 @@ async fn stop(backend: &Backend) -> Result<()> {
     if let Some(mtproto) = session.mtproto.take() {
         mtproto.abort();
     }
+    let was_tun = session.settings.mode == "tun";
     if let Some(mut child) = session.child.take() {
         #[cfg(unix)]
         if let Some(id) = child.id() {
@@ -1094,7 +1234,14 @@ async fn stop(backend: &Backend) -> Result<()> {
         {
             child.kill().await.map_err(|e| e.to_string())?;
         }
+        #[cfg(windows)]
+        if was_tun {
+            // Give Windows Wintun kernel driver a moment to release the adapter handle before reconnect.
+            tokio::time::sleep(Duration::from_millis(350)).await;
+        }
     }
+    let _ = was_tun;
+    let _ = tokio::fs::remove_file(backend.dir.join("sing-box.pid")).await;
     if system_proxy::active() {
         system_proxy::restore()?;
     }
@@ -1544,5 +1691,21 @@ mod tests {
                 String::from_utf8_lossy(&output.stderr)
             );
         }
+    }
+
+    #[test]
+    fn windows_tun_interface_names_are_distinct_and_collisions_detected() {
+        let a = windows_tun_interface_name("7e69bfba-5367-4ef1-ad72-215d20230bd4");
+        let b = windows_tun_interface_name("4a46d4cd-eebd-405e-a1d0-1666202c8fdc");
+        assert_eq!(a, "kasper-7e69bf");
+        assert_eq!(b, "kasper-4a46d4");
+        assert_ne!(a, b);
+        assert!(a.len() <= 15);
+        assert_eq!(windows_tun_interface_name("---"), "kasper-tun");
+
+        assert!(is_tun_adapter_collision(
+            "FATAL[0015] start service: start inbound/tun[tun-in]: configure tun interface: (create adapter: Cannot create a file when that file already exists. | open existing adapter: Element not found.)"
+        ));
+        assert!(!is_tun_adapter_collision("sing-box exited: unknown host"));
     }
 }
